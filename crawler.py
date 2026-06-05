@@ -3,9 +3,10 @@ import re
 import json
 import time
 import requests
+import hashlib  # 用于生成 SHA-256 摘要
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ==================== 配置区 ====================
 # 【方案二】在此处配置你的 E-Hentai / ExHentai Cookies 字典
@@ -59,13 +60,14 @@ def process_url(url: str):
 def parse_time(time_str: str) -> str:
     """
     处理时间格式。将时间转换为 ISO 8601 格式的时间戳。
-    如果是"just now"或"刚刚"，转换为当前系统时间的 ISO 格式。
+    由于 E-Hentai 画廊主站网页文本写死的时间就是 UTC+0，直接解析并格式化输出。
     """
     time_str = time_str.strip()
     if "just now" in time_str.lower() or "刚刚" in time_str:
-        return datetime.now().isoformat() + "Z"
+        # 显式用 replace(tzinfo=None) 抹除时区属性，避免 isoformat() 产生 +00:00Z 的双重后缀
+        return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     
-    # 尝试解析常见的时间格式并转换为 ISO 格式
+    # 尝试解析常见的时间格式
     formats = [
         "%d %B %Y, %H:%M",      # "04 June 2026, 12:39"
         "%d %B %Y, %H:%M:%S",   # "04 June 2026, 12:39:45"
@@ -81,7 +83,6 @@ def parse_time(time_str: str) -> str:
         except ValueError:
             continue
     
-    # 如果无法解析，直接返回原字符串
     return time_str
 
 def convert_to_mongodb_date(iso_timestamp: str) -> dict:
@@ -120,6 +121,7 @@ def crawl_comments(input_url: str):
         print("未在页面中找到评论区容器 (#cdiv)。请确认您的 Cookies 是否有效且拥有相应权限。")
         return
         
+    uploader_comment = ""  # 用于存放上传者置顶评论内容
     anchors = cdiv.find_all('a', attrs={'name': re.compile(r'^c\d+$')})
     
     for anchor in anchors:
@@ -127,6 +129,13 @@ def crawl_comments(input_url: str):
         
         # 严格过滤置顶评论 c0
         if anchor_name == 'c0':
+            comment_div = anchor.find_next_sibling('div')
+            if comment_div:
+                c6_div = comment_div.find('div', id='comment_0')
+                if not c6_div:
+                    c6_div = comment_div.find('div', class_='c6')
+                if c6_div:
+                    uploader_comment = "".join(str(child) for child in c6_div.children)
             continue
             
         comment_id = anchor_name[1:] 
@@ -134,12 +143,13 @@ def crawl_comments(input_url: str):
         if not comment_div:
             continue
             
-        # 提取发送人、原始发送时间以及论坛用户 ID / 用户地址 (对应 class="c3")
+        # 提取发送人、原始发送时间以及论坛用户 ID (对应 class="c3")
         c3_div = comment_div.find('div', class_='c3')
         username = "Unknown"
         post_time = None
-        user_id = ""
-        user_forums_url = ""
+        
+        extracted_user_id = None
+        extracted_forums_url = None
         
         if c3_div:
             text_content = c3_div.get_text()
@@ -157,10 +167,10 @@ def crawl_comments(input_url: str):
                 href_str = forums_a.get('href')
                 id_match = re.search(r'showuser=(\d+)', href_str)
                 if id_match:
-                    user_id = id_match.group(1)
-                    user_forums_url = f"https://forums.e-hentai.org/index.php?showuser={user_id}"
+                    extracted_user_id = id_match.group(1)
+                    extracted_forums_url = f"https://forums.e-hentai.org/index.php?showuser={extracted_user_id}"
                 
-        # 【新增属性 1】提取当前评论分数 current_score
+        # 提取当前评论分数 current_score
         score_span = comment_div.find('span', id=f'comment_score_{comment_id}')
         current_score = 0
         if score_span:
@@ -169,27 +179,22 @@ def crawl_comments(input_url: str):
             except ValueError:
                 pass
 
-        # 【新增属性 2 & 3】提取评论者基础权限分 power 与具体的投票列表 vote_list
+        # 提取评论者基础权限分 power 与具体的投票列表 vote_list
         c7_div = comment_div.find('div', id=f'cvotes_{comment_id}')
         if not c7_div:
             c7_div = comment_div.find('div', class_='c7')
-            
+        
         power = 0
         vote_list = []
         if c7_div:
             c7_text = c7_div.get_text()
-            # 匹配 Base 权限分数
             base_match = re.search(r'Base\s+([+-]?\d+)', c7_text)
             if base_match:
                 power = int(base_match.group(1))
-                
-            # 提取具体的投票人列表
             for span in c7_div.find_all('span'):
                 span_text = span.get_text().strip()
-                # 显式忽略可能混入或包含 'and ... more' 的内容
                 if "and" in span_text and "more" in span_text:
                     continue
-                # 匹配用户名和带正负号的分数（兼容多行或复杂空白字符）
                 span_match = re.search(r'^(.*?)\s+([+-]?\d+)$', span_text, re.DOTALL)
                 if span_match:
                     voter_name = span_match.group(1).strip()
@@ -199,12 +204,11 @@ def crawl_comments(input_url: str):
                         "power": voter_power
                     })
 
-        # 提取评论内容 (整个 class 包含 c6 的节点字符串)
+        # 提取评论内容
         c6_div = comment_div.find('div', id=f'comment_{comment_id}')
         if not c6_div:
             c6_div = comment_div.find('div', class_='c6')
         
-        # 获取 c6_div 的内部 HTML 内容，而不是整个 div
         content_html = "".join(str(child) for child in c6_div.children) if c6_div else ""
         
         # 检查是否修改过 (通过 class="c8")
@@ -221,10 +225,8 @@ def crawl_comments(input_url: str):
                 iso_edit_time = parse_time(c8_text.rstrip('.'))
             
             mongodb_edit_time = convert_to_mongodb_date(iso_edit_time)
-            
             edit_content = content_html
             
-            # 分离存储：提取为独立的编辑信息 JSON 结构
             edits_list.append({
                 "comment_id": comment_id,
                 "edit_time": mongodb_edit_time,
@@ -234,9 +236,8 @@ def crawl_comments(input_url: str):
         # 封装评论主数据字典
         comment_data = {
             "_id": comment_id,
+            "gallery_id": gallery_id,       # 新增画廊关联 ID，支撑高效聚合操作
             "username": username,
-            "user_id": user_id,
-            "user_forums_url": user_forums_url,
             "post_time": post_time,
             "source_url": target_url,
             "current_score": current_score,
@@ -245,55 +246,100 @@ def crawl_comments(input_url: str):
             "is_edited": is_edited
         }
         
-        # 新规限定：如果没有被修改，主数据才带有 content 属性；被修改过的主数据完全没有 content 属性
+        if extracted_user_id:
+            comment_data["user_id"] = extracted_user_id
+        if extracted_forums_url:
+            comment_data["user_forums_url"] = extracted_forums_url
+        
         if not is_edited:
             comment_data["content"] = content_html
         
         comments_list.append(comment_data)
         
+    # 在主体 DOM 树中独立提取画廊上传者信息
+    gdn_div = soup.find('div', id='gdn')
+    
+    # 动态执行时间保持标准的 UTC+0 瞬间时间
+    utc_now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    
+    # 针对上传者评论内容计算出唯一的 SHA-256 摘要字段
+    comment_digest = hashlib.sha256(uploader_comment.encode('utf-8')).hexdigest()
+    
+    uploader_data = {
+        "gallery_id": gallery_id,
+        "source_url": target_url,
+        "uploader_comment": uploader_comment,
+        "comment_sha256": comment_digest,
+        "time": convert_to_mongodb_date(utc_now_str)
+    }
+    
+    if gdn_div:
+        uploader_a = gdn_div.find('a', href=re.compile(r'/uploader/'))
+        if uploader_a:
+            uploader_data["uploader_name"] = uploader_a.get_text().strip()
+            
+        forums_a = gdn_div.find('a', href=re.compile(r'showuser=\d+'))
+        if forums_a:
+            id_match = re.search(r'showuser=(\d+)', forums_a.get('href', ''))
+            if id_match:
+                uploader_data["uploader_id"] = id_match.group(1)
+        
     # 4. 导出文件
-    if comments_list:
-        save_all_data(comments_list, edits_list, gallery_id)
-    else:
+    if comments_list or uploader_data:
+        save_all_data(comments_list, edits_list, uploader_data, gallery_id)
+        
+    if not comments_list:
         print("未抓取到有效评论。请检查该画廊下是否有评论，或者确认你的 Cookies 是否已失效。")
 
-def save_all_data(comments_list, edits_list, gallery_id: str):
+def save_all_data(comments_list, edits_list, uploader_data, gallery_id: str):
     """
-    分别导出评论主数据和编辑历史数据到对应的指定文件夹中。
+    分别导出评论主数据、编辑历史数据与画廊上传者数据到对应的指定文件夹中。
     """
     current_dir = os.path.dirname(os.path.abspath(__file__))
     timestamp = int(time.time())
     filename = f"{gallery_id}-{timestamp}.json"
     filename_edit = f"{gallery_id}-{timestamp}-edits.json"
+    filename_uploader = f"{gallery_id}-{timestamp}-uploader.json"
     
-    # --- 1. 存储评论主数据（标准的 JSON 数组格式） ---
-    comments_dir = os.path.join(current_dir, "comments")
-    if not os.path.exists(comments_dir):
-        os.makedirs(comments_dir)
-    comments_path = os.path.join(comments_dir, filename)
+    # --- 1. 存储评论主数据 ---
+    if comments_list:
+        comments_dir = os.path.join(current_dir, "comments")
+        if not os.path.exists(comments_dir):
+            os.makedirs(comments_dir)
+        comments_path = os.path.join(comments_dir, filename)
+        
+        with open(comments_path, "w", encoding="utf-8") as f:
+            json.dump(comments_list, f, ensure_ascii=False, indent=2)
+        print(f"评论主数据已存储至: {comments_path}")
     
-    with open(comments_path, "w", encoding="utf-8") as f:
-        json.dump(comments_list, f, ensure_ascii=False, indent=2)
-    print(f"评论主数据已存储至: {comments_path}")
-    
-    # --- 2. 存储编辑历史数据（指定要求：新建 comment_edits 文件夹，以标准的 JSON 数组格式保存） ---
-    edits_dir = os.path.join(current_dir, "comment_edits")
-    if not os.path.exists(edits_dir):
-        os.makedirs(edits_dir)
-    edits_path = os.path.join(edits_dir, filename_edit)
-    
-    if len(edits_list)>0:
+    # --- 2. 存储编辑历史数据 ---
+    if len(edits_list) > 0:
+        edits_dir = os.path.join(current_dir, "comment_edits")
+        if not os.path.exists(edits_dir):
+            os.makedirs(edits_dir)
+        edits_path = os.path.join(edits_dir, filename_edit)
+        
         with open(edits_path, "w", encoding="utf-8") as f:
             json.dump(edits_list, f, ensure_ascii=False, indent=2)
         print(f"编辑历史数据已存储至: {edits_path}")
     else:
         print("没有编辑历史数据需要存储。")
+        
+    # --- 3. 存储画廊上传者信息数据 ---
+    if uploader_data:
+        uploader_dir = os.path.join(current_dir, "gallery_uploaders")
+        if not os.path.exists(uploader_dir):
+            os.makedirs(uploader_dir)
+        uploader_path = os.path.join(uploader_dir, filename_uploader)
+        
+        with open(uploader_path, "w", encoding="utf-8") as f:
+            json.dump([uploader_data], f, ensure_ascii=False, indent=2)
+        print(f"画廊上传者数据已存储至: {uploader_path}")
 
 # ----------------- 测试运行 -----------------
 if __name__ == "__main__":
-    # 交互模式：用户输入网址
     print("=" * 50)
-    print("E-Hentai 评论爬虫 - 交互模式")
+    print("E-Hentai 评论与画廊信息爬虫 - 交互模式")
     print("=" * 50)
     
     while True:

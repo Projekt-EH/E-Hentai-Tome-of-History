@@ -1,3 +1,5 @@
 comments
 comment_edits
 venv
+*.json
+**/*.json
