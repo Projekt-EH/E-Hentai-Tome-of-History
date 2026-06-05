@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 # 【方案二】在此处配置你的 E-Hentai / ExHentai Cookies 字典 - 默认值
 DEFAULT_COOKIES = {
     'igneous': 'mystery',       # 替换为你的 igneous 值
-    'ipb_member_id': '0',                          # 替换为你的 member_id
+    'ipb_member_id': '0',       # 替换为你的 member_id
     'ipb_pass_hash': '0'   # 替换为你的 pass_hash
 }
 
