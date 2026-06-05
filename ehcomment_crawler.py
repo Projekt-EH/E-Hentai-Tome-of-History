@@ -9,8 +9,8 @@ from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from datetime import datetime, timezone
 
 # ==================== 配置区 ====================
-# 【方案二】在此处配置你的 E-Hentai / ExHentai Cookies 字典
-COOKIES = {
+# 【方案二】在此处配置你的 E-Hentai / ExHentai Cookies 字典 - 默认值
+DEFAULT_COOKIES = {
     'igneous': 'mystery',       # 替换为你的 igneous 值
     'ipb_member_id': '0',                          # 替换为你的 member_id
     'ipb_pass_hash': '0'   # 替换为你的 pass_hash
@@ -20,7 +20,88 @@ COOKIES = {
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
+
+# 运行时动态设置的 COOKIES
+COOKIES = DEFAULT_COOKIES.copy()
 # ================================================
+
+def get_config_path():
+    """
+    获取 config.json 的路径（与程序所在目录相同）
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(current_dir, "config.json")
+
+def create_default_config():
+    """
+    如果 config.json 不存在，则创建一个包含默认值的 config.json 文件
+    """
+    config_path = get_config_path()
+    
+    if not os.path.exists(config_path):
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_COOKIES, f, ensure_ascii=False, indent=2)
+            print(f"已创建默认配置文件: {config_path}")
+        except Exception as e:
+            print(f"创建配置文件失败: {e}")
+    
+    return config_path
+
+def load_config_from_file():
+    """
+    从 config.json 加载用户自定义的 Cookies 配置
+    """
+    config_path = get_config_path()
+    
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            return config
+        else:
+            print(f"配置文件不存在: {config_path}")
+            return None
+    except Exception as e:
+        print(f"读取配置文件失败: {e}")
+        return None
+
+def ask_config_choice():
+    """
+    在程序启动时询问用户是否使用 config.json 配置
+    返回: True 使用config配置, False 使用默认配置
+    """
+    while True:
+        print("\n请选择 Cookie 配置方案：")
+        print("1 - 使用 config.json 配置（用户自定义 Cookie）")
+        print("2 - 使用程序默认配置")
+        print("输入 'exit' 或 'quit' 退出程序\n")
+        
+        user_choice = input("> ").strip().lower()
+        
+        if user_choice.lower() in ['quit', 'exit', 'q']:
+            print("程序已退出。")
+            return None
+        
+        if user_choice == '1':
+            # 创建默认config文件（如果不存在）
+            create_default_config()
+            # 尝试加载config
+            config = load_config_from_file()
+            if config:
+                print("已加载 config.json 配置。")
+                return config
+            else:
+                print("无法加载配置文件，请检查文件内容。")
+                continue
+        
+        elif user_choice == '2':
+            print("已使用程序默认配置。")
+            return DEFAULT_COOKIES.copy()
+        
+        else:
+            print("错误：请输入 1、2、exit 或 quit。")
+            continue
 
 def process_url(url: str):
     """
@@ -344,8 +425,20 @@ if __name__ == "__main__":
     print("E-Hentai 评论与画廊信息爬虫 - 交互模式")
     print("=" * 50)
     
+    # 询问用户 Cookie 配置方案
+    config_result = ask_config_choice()
+    
+    if config_result is None:
+        # 用户选择退出
+        exit(0)
+    
+    # 更新全局 COOKIES 变量
+    COOKIES = config_result
+    
+    print("\n开始爬虫任务...")
+    
     while True:
-        user_input = input("\n请输入 E-Hentai/ExHentai 画廊网址（或输入 'quit' 退出）:\n> ").strip()
+        user_input = input("\n请输入 E-Hentai/ExHentai 画廊网址（或输入 \'exit\' 或 \'quit\' 退出）:\n> ").strip()
         
         if user_input.lower() in ['quit', 'exit', 'q']:
             print("程序已退出。")
