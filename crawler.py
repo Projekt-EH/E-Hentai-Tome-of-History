@@ -32,10 +32,10 @@ def process_url(url: str):
     allowed_domains = ["e-hentai.org", "exhentai.org"]
     
     if parsed_url.netloc not in allowed_domains or not parsed_url.path.startswith("/g/"):
-        print("错误：输入的网址不在限定范围 (https://e-hentai.org/g/*) 内。")
+        print("错误：输入的网址不在限定范围 (https://e-hentai.org/g/* 或 https://exhentai.org/g/*) 内。")
         return None, None
     
-    # 从路径中提取画廊 ID
+    # 从路径中提取画廊 ID，例如 /g/3707254/78bc70a6c6/ -> 3707254
     path_parts = [p for p in parsed_url.path.split('/') if p]
     gallery_id = path_parts[1] if len(path_parts) > 1 else "unknown"
     
@@ -113,13 +113,13 @@ def crawl_comments(input_url: str):
     # 3. 解析 HTML 结构
     soup = BeautifulSoup(html_content, 'html.parser')
     comments_list = []
+    edits_list = []  # 存放分离出来的编辑记录数据
     
     cdiv = soup.find('div', id='cdiv')
     if not cdiv:
         print("未在页面中找到评论区容器 (#cdiv)。请确认您的 Cookies 是否有效且拥有相应权限。")
         return
         
-    # 【已修复】改用 attrs 字典传入，避免了内置位置参数 'name' 的多值冲突报错
     anchors = cdiv.find_all('a', attrs={'name': re.compile(r'^c\d+$')})
     
     for anchor in anchors:
@@ -148,13 +148,10 @@ def crawl_comments(input_url: str):
                 iso_time = parse_time(time_match.group(1))
                 post_time = convert_to_mongodb_date(iso_time)
             
-            # 提取显示名
             user_a = c3_div.find('a')
             if user_a:
                 username = user_a.get_text().strip()
             
-            # 【新属性】提取 Forums 用户 ID 并生成用户地址
-            # 寻找形如 showuser=xxxx 的论坛链接
             forums_a = c3_div.find('a', href=re.compile(r'showuser=\d+'))
             if forums_a:
                 href_str = forums_a.get('href')
@@ -163,7 +160,7 @@ def crawl_comments(input_url: str):
                     user_id = id_match.group(1)
                     user_forums_url = f"https://forums.e-hentai.org/index.php?showuser={user_id}"
                 
-        # 提取评论内容 (仅提取内部 HTML，不包含 c6 div 的包装器)
+        # 提取评论内容 (整个 class 包含 c6 的节点字符串)
         c6_div = comment_div.find('div', id=f'comment_{comment_id}')
         if not c6_div:
             c6_div = comment_div.find('div', class_='c6')
@@ -175,7 +172,7 @@ def crawl_comments(input_url: str):
         c8_divs = comment_div.find_all('div', class_='c8')
         is_edited = len(c8_divs) > 0
         
-        edit_history = []
+        # 收集分离出来的修改历史
         for c8 in c8_divs:
             c8_text = c8.get_text()
             edit_time_match = re.search(r'on\s+(.*)', c8_text)
@@ -186,62 +183,66 @@ def crawl_comments(input_url: str):
             
             mongodb_edit_time = convert_to_mongodb_date(iso_edit_time)
             
-            # 编辑历史中的内容应该是编辑时期的 c6 内容
-            edit_history.append({
+            edit_content = content_html
+            
+            # 分离存储：提取为独立的编辑信息 JSON 结构
+            edits_list.append({
+                "comment_id": comment_id,
                 "edit_time": mongodb_edit_time,
-                "edit_content": content_html
+                "edit_content": edit_content
             })
             
-        # 封装数据字典
+        # 封装评论主数据字典
         comment_data = {
             "_id": comment_id,
             "username": username,
             "user_id": user_id,
             "user_forums_url": user_forums_url,
+            "post_time": post_time,
             "source_url": target_url,
             "is_edited": is_edited
         }
         
-        # 如果有 post_time，添加到字典中
-        if post_time:
-            comment_data["post_time"] = post_time
-        
-        # 有编辑历史时不包含 content 字段；否则包含原有 content
+        # 新规限定：如果没有被修改，主数据才带有 content 属性；被修改过的主数据完全没有 content 属性
         if not is_edited:
             comment_data["content"] = content_html
-        
-        # 添加编辑历史
-        comment_data["edit_history"] = edit_history
         
         comments_list.append(comment_data)
         
     # 4. 导出文件
     if comments_list:
-        save_to_mongodb_file(comments_list, gallery_id)
+        save_all_data(comments_list, edits_list, gallery_id)
     else:
         print("未抓取到有效评论。请检查该画廊下是否有评论，或者确认你的 Cookies 是否已失效。")
 
-def save_to_mongodb_file(data_list, gallery_id: str):
+def save_all_data(comments_list, edits_list, gallery_id: str):
     """
-    自动创建 comments 文件夹，并将数据以 '画廊id-时间戳.json' 格式保存。
-    格式为标准 JSON 数组，包含所有抓取的文档。
+    分别导出评论主数据和编辑历史数据到对应的指定文件夹中。
     """
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(current_dir, "comments")
-    
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        
     timestamp = int(time.time())
     filename = f"{gallery_id}-{timestamp}.json"
-    file_path = os.path.join(output_dir, filename)
+    filename_edit = f"{gallery_id}-{timestamp}-edits.json"
     
-    # 写入文件：标准 JSON 数组格式，所有文档在一个数组中
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data_list, f, ensure_ascii=False, indent=2)
-
-    print(f"数据已成功存储至: {file_path}")
-    print(f"可使用 mongoimport 导入: mongoimport --db <db> --jsonArray --collection comments --file {file_path}")
+    # --- 1. 存储评论主数据（标准的 JSON 数组格式） ---
+    comments_dir = os.path.join(current_dir, "comments")
+    if not os.path.exists(comments_dir):
+        os.makedirs(comments_dir)
+    comments_path = os.path.join(comments_dir, filename)
+    
+    with open(comments_path, "w", encoding="utf-8") as f:
+        json.dump(comments_list, f, ensure_ascii=False, indent=2)
+    print(f"评论主数据已存储至: {comments_path}")
+    
+    # --- 2. 存储编辑历史数据（指定要求：新建 comment_edits 文件夹，以标准的 JSON 数组格式保存） ---
+    edits_dir = os.path.join(current_dir, "comment_edits")
+    if not os.path.exists(edits_dir):
+        os.makedirs(edits_dir)
+    edits_path = os.path.join(edits_dir, filename_edit)
+    
+    with open(edits_path, "w", encoding="utf-8") as f:
+        json.dump(edits_list, f, ensure_ascii=False, indent=2)
+    print(f"编辑历史数据已存储至: {edits_path}")
 
 # ----------------- 测试运行 -----------------
 if __name__ == "__main__":
