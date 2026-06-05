@@ -236,7 +236,7 @@ def crawl_comments(input_url: str):
         # 封装评论主数据字典
         comment_data = {
             "_id": comment_id,
-            "gallery_id": gallery_id,       # 新增画廊关联 ID，支撑高效聚合操作
+            "gallery_id": gallery_id,
             "username": username,
             "post_time": post_time,
             "source_url": target_url,
@@ -262,16 +262,18 @@ def crawl_comments(input_url: str):
     # 动态执行时间保持标准的 UTC+0 瞬间时间
     utc_now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
     
-    # 针对上传者评论内容计算出唯一的 SHA-256 摘要字段
-    comment_digest = hashlib.sha256(uploader_comment.encode('utf-8')).hexdigest()
-    
+    # 优化点：初始化基础属性，排除 uploader_comment 和 comment_sha256
     uploader_data = {
         "gallery_id": gallery_id,
         "source_url": target_url,
-        "uploader_comment": uploader_comment,
-        "comment_sha256": comment_digest,
         "time": convert_to_mongodb_date(utc_now_str)
     }
+    
+    # 仅在存在上传者置顶评论时，动态计算 SHA-256 并将其写入字典中
+    if uploader_comment:
+        comment_digest = hashlib.sha256(uploader_comment.encode('utf-8')).hexdigest()
+        uploader_data["uploader_comment"] = uploader_comment
+        uploader_data["comment_sha256"] = comment_digest
     
     if gdn_div:
         uploader_a = gdn_div.find('a', href=re.compile(r'/uploader/'))
@@ -334,7 +336,7 @@ def save_all_data(comments_list, edits_list, uploader_data, gallery_id: str):
         
         with open(uploader_path, "w", encoding="utf-8") as f:
             json.dump([uploader_data], f, ensure_ascii=False, indent=2)
-        print(f"画廊上传者数据已存储至: {uploader_path}")
+        print(f"画廊上传者评论数据已存储至: {uploader_path}")
 
 # ----------------- 测试运行 -----------------
 if __name__ == "__main__":
