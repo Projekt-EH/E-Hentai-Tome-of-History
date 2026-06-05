@@ -160,6 +160,45 @@ def crawl_comments(input_url: str):
                     user_id = id_match.group(1)
                     user_forums_url = f"https://forums.e-hentai.org/index.php?showuser={user_id}"
                 
+        # 【新增属性 1】提取当前评论分数 current_score
+        score_span = comment_div.find('span', id=f'comment_score_{comment_id}')
+        current_score = 0
+        if score_span:
+            try:
+                current_score = int(score_span.get_text().strip())
+            except ValueError:
+                pass
+
+        # 【新增属性 2 & 3】提取评论者基础权限分 power 与具体的投票列表 vote_list
+        c7_div = comment_div.find('div', id=f'cvotes_{comment_id}')
+        if not c7_div:
+            c7_div = comment_div.find('div', class_='c7')
+            
+        power = 0
+        vote_list = []
+        if c7_div:
+            c7_text = c7_div.get_text()
+            # 匹配 Base 权限分数
+            base_match = re.search(r'Base\s+([+-]?\d+)', c7_text)
+            if base_match:
+                power = int(base_match.group(1))
+                
+            # 提取具体的投票人列表
+            for span in c7_div.find_all('span'):
+                span_text = span.get_text().strip()
+                # 显式忽略可能混入或包含 'and ... more' 的内容
+                if "and" in span_text and "more" in span_text:
+                    continue
+                # 匹配用户名和带正负号的分数（兼容多行或复杂空白字符）
+                span_match = re.search(r'^(.*?)\s+([+-]?\d+)$', span_text, re.DOTALL)
+                if span_match:
+                    voter_name = span_match.group(1).strip()
+                    voter_power = int(span_match.group(2))
+                    vote_list.append({
+                        "voter": voter_name,
+                        "power": voter_power
+                    })
+
         # 提取评论内容 (整个 class 包含 c6 的节点字符串)
         c6_div = comment_div.find('div', id=f'comment_{comment_id}')
         if not c6_div:
@@ -200,6 +239,9 @@ def crawl_comments(input_url: str):
             "user_forums_url": user_forums_url,
             "post_time": post_time,
             "source_url": target_url,
+            "current_score": current_score,
+            "power": power,
+            "vote_list": vote_list,
             "is_edited": is_edited
         }
         
@@ -240,9 +282,12 @@ def save_all_data(comments_list, edits_list, gallery_id: str):
         os.makedirs(edits_dir)
     edits_path = os.path.join(edits_dir, filename_edit)
     
-    with open(edits_path, "w", encoding="utf-8") as f:
-        json.dump(edits_list, f, ensure_ascii=False, indent=2)
-    print(f"编辑历史数据已存储至: {edits_path}")
+    if len(edits_list)>0:
+        with open(edits_path, "w", encoding="utf-8") as f:
+            json.dump(edits_list, f, ensure_ascii=False, indent=2)
+        print(f"编辑历史数据已存储至: {edits_path}")
+    else:
+        print("没有编辑历史数据需要存储。")
 
 # ----------------- 测试运行 -----------------
 if __name__ == "__main__":
