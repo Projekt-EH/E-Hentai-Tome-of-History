@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 DEFAULT_COOKIES = {
     'igneous': 'mystery',       # 替换为你的 igneous 值
     'ipb_member_id': '0',       # 替换为你的 member_id
-    'ipb_pass_hash': '0'   # 替换为你的 pass_hash
+    'ipb_pass_hash': '0',   # 替换为你的 pass_hash
+    'nw': '1'                 # no warning
 }
 
 # 全局请求头设置
