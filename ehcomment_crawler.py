@@ -2,57 +2,124 @@ import os
 import re
 import json
 import time
+import random
 import requests
-import hashlib  # 用于生成 SHA-256 摘要
+import hashlib
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+from requests.adapters import HTTPAdapter
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, urljoin
 from datetime import datetime, timezone
+from urllib3.util.retry import Retry
 
-# ==================== 配置区 ====================
-# 【方案二】在此处配置你的 E-Hentai / ExHentai Cookies 字典 - 默认值
+
+# ==================== Configuration ====================
+# Cookie credentials are stored in config.json. Keep this source template empty.
 DEFAULT_COOKIES = {
-    'igneous': 'mystery',       # 替换为你的 igneous 值
-    'ipb_member_id': '0',       # 替换为你的 member_id
-    'ipb_pass_hash': '0',   # 替换为你的 pass_hash
-    'nw': '1'                 # no warning
+    'ipb_member_id': '',
+    'ipb_pass_hash': '',
+    'igneous': '',
+    'nw': '1',
+    "star": ""
 }
 
-# 全局请求头设置
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
-# 运行时动态设置的 COOKIES
-COOKIES = DEFAULT_COOKIES.copy()
+REQUEST_DELAY_MS = 1000
+REQUEST_DELAY_JITTER = 0.30
+DEBUG_MODE = False
 # ================================================
 
+def create_session():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        respect_retry_after_header=True
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    return session
+
+SESSION = create_session()
+
+# ==================== Debug and diagnostics ====================
+def is_debug_enabled() -> bool:
+    return DEBUG_MODE
+
+def debug_print(message: str):
+    if is_debug_enabled():
+        print(message)
+
+def build_request_result(ok, html, error, status_code, final_url, redirected, response=None):
+    result = {
+        "ok": ok,
+        "html": html,
+        "error": error,
+        "status_code": status_code,
+        "final_url": final_url,
+        "redirected": redirected
+    }
+    if is_debug_enabled():
+        result.update({
+            "content_type": response.headers.get("content-type") if response is not None else None,
+            "content_length": len(response.text) if response is not None and response.text else 0
+        })
+    return result
+
+def report_request_failure(error, status_code, final_url, exception=None):
+    print(f"Request diagnosis: {error} | status={status_code} | final_url={final_url}")
+    if exception is not None:
+        debug_print(f"  request_error: {exception}")
+
+def print_missing_cdiv_summary(reason, request_result):
+    print(
+        f"Gallery page diagnosis: {reason} "
+        f"| status={request_result.get('status_code', 'N/A')} "
+        f"| final_url={request_result.get('final_url', 'N/A')}"
+    )
+
+def print_missing_cdiv_debug(reason, title, url, request_result, body_text):
+    debug_print(f"Gallery page diagnosis: {reason} | title={title or 'N/A'}")
+    debug_print(f"  target_url: {url}")
+    debug_print(f"  final_url: {request_result.get('final_url', 'N/A')}")
+    debug_print(f"  redirected: {request_result.get('redirected', 'N/A')}")
+    debug_print(f"  status_code: {request_result.get('status_code', 'N/A')}")
+    debug_print(f"  content_type: {request_result.get('content_type', 'N/A')}")
+    debug_print(f"  content_length: {request_result.get('content_length', 'N/A')}")
+    snippet = body_text[:300].replace("\n", " ").strip()
+    if snippet:
+        debug_print(f"  page_text: {snippet}")
+
+# ==================== Config and cookies ====================
 def get_config_path():
-    """
-    获取 config.json 的路径（与程序所在目录相同）
-    """
     current_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(current_dir, "config.json")
 
 def create_default_config():
-    """
-    如果 config.json 不存在，则创建一个包含默认值的 config.json 文件
-    """
     config_path = get_config_path()
     
     if not os.path.exists(config_path):
         try:
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(DEFAULT_COOKIES, f, ensure_ascii=False, indent=2)
-            print(f"已创建默认配置文件: {config_path}")
+            print(f"Created empty config template: {config_path}")
         except Exception as e:
-            print(f"创建配置文件失败: {e}")
+            print(f"Failed to create config file: {e}")
     
     return config_path
 
 def load_config_from_file():
-    """
-    从 config.json 加载用户自定义的 Cookies 配置
-    """
     config_path = get_config_path()
     
     try:
@@ -61,73 +128,137 @@ def load_config_from_file():
                 config = json.load(f)
             return config
         else:
-            print(f"配置文件不存在: {config_path}")
+            print(f"Config file does not exist: {config_path}")
             return None
     except Exception as e:
-        print(f"读取配置文件失败: {e}")
+        print(f"Failed to read config file: {e}")
         return None
 
-def ask_config_choice():
-    """
-    在程序启动时询问用户是否使用 config.json 配置
-    返回: True 使用config配置, False 使用默认配置
-    """
-    while True:
-        print("\n请选择 Cookie 配置方案：")
-        print("1 - 使用 config.json 配置（用户自定义 Cookie）")
-        print("2 - 使用程序默认配置")
-        print("输入 'exit' 或 'quit' 退出程序\n")
-        
-        user_choice = input("> ").strip().lower()
-        
-        if user_choice.lower() in ['quit', 'exit', 'q']:
-            print("程序已退出。")
-            return None
-        
-        if user_choice == '1':
-            # 创建默认config文件（如果不存在）
-            create_default_config()
-            # 尝试加载config
-            config = load_config_from_file()
-            if config:
-                print("已加载 config.json 配置。")
-                return config
-            else:
-                print("无法加载配置文件，请检查文件内容。")
-                continue
-        
-        elif user_choice == '2':
-            print("已使用程序默认配置。")
-            return DEFAULT_COOKIES.copy()
-        
+def has_usable_cookies(cookies: dict) -> bool:
+    required_cookie_names = ("ipb_member_id", "ipb_pass_hash")
+    return all(str(cookies.get(name, "")).strip() for name in required_cookie_names)
+
+def load_runtime_cookies():
+    config_path = create_default_config()
+    config = load_config_from_file()
+    if config and has_usable_cookies(config):
+        print(f"Loaded cookie config: {config_path}")
+        return config
+
+    print(f"Cookie config is missing or empty: {config_path}")
+    choice = input("Continue with empty cookies? (y/N): ").strip().lower()
+    if choice in ["y", "yes"]:
+        print("Using empty cookies. Requests may fail.")
+        return DEFAULT_COOKIES.copy()
+
+    print("Program exited. Fill config.json and run again.")
+    return None
+
+# ==================== HTTP requests ====================
+def request_html(url: str):
+    try:
+        response = SESSION.get(url, timeout=12)
+        response.raise_for_status()
+        final_url = response.url
+        redirected = final_url != url
+        if redirected:
+            print(f"Request redirected: {url} -> {final_url}")
+        return build_request_result(
+            True, response.text, None, response.status_code, final_url, redirected, response
+        )
+    except requests.exceptions.Timeout as e:
+        report_request_failure("timeout", None, url, e)
+        return build_request_result(False, None, "timeout", None, url, False)
+    except requests.exceptions.ConnectionError as e:
+        report_request_failure("connection_error", None, url, e)
+        return build_request_result(False, None, "connection_error", None, url, False)
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else None
+        if status_code == 403:
+            error = "http_403"
+        elif status_code == 404:
+            error = "http_404"
+        elif status_code == 429:
+            error = "http_429"
+        elif status_code and 500 <= status_code <= 599:
+            error = "http_5xx"
+        elif status_code:
+            error = f"http_{status_code}"
         else:
-            print("错误：请输入 1、2、exit 或 quit。")
-            continue
+            error = "http_error"
+        final_url = e.response.url if e.response is not None else url
+        report_request_failure(error, status_code, final_url, e)
+        return build_request_result(
+            False, None, error, status_code, final_url, final_url != url, e.response
+        )
+    except requests.exceptions.RequestException as e:
+        report_request_failure("request_exception", None, url, e)
+        return build_request_result(False, None, "request_exception", None, url, False)
+
+# ==================== URL and pagination helpers ====================
+def extract_gallery_key(url: str):
+    parsed_url = urlparse(url)
+    path_parts = [p for p in parsed_url.path.split('/') if p]
+    if len(path_parts) >= 3 and path_parts[0] == "g":
+        return path_parts[1], path_parts[2]
+    return None
+
+def get_delay_seconds() -> float:
+    base_seconds = REQUEST_DELAY_MS / 1000
+    jitter_seconds = base_seconds * REQUEST_DELAY_JITTER
+    return random.uniform(base_seconds - jitter_seconds, base_seconds + jitter_seconds)
+
+def sleep_with_jitter():
+    time.sleep(get_delay_seconds())
+
+def parse_page_range(page_range_text: str):
+    text = page_range_text.strip()
+    if not text:
+        return None, None
+
+    if re.fullmatch(r'\d+', text):
+        page = int(text)
+        return page, page
+
+    match = re.fullmatch(r'(\d+)\s*-\s*(\d+)', text)
+    if not match:
+        raise ValueError("Page range must be empty, a single number, or start-end.")
+
+    start_page = int(match.group(1))
+    end_page = int(match.group(2))
+    if start_page > end_page:
+        raise ValueError("Page range start must be less than or equal to end.")
+
+    return start_page, end_page
+
+def set_page_url(url: str, page_number: int):
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    query_params["page"] = [str(page_number)]
+    return urlunparse((
+        parsed_url.scheme,
+        parsed_url.netloc,
+        parsed_url.path,
+        parsed_url.params,
+        urlencode(query_params, doseq=True),
+        parsed_url.fragment
+    ))
 
 def process_url(url: str):
-    """
-    验证和规范化URL。
-    1. 限定网址为 https://e-hentai.org/g/* 或 https://exhentai.org/g/*
-    2. 检查是否有 ?hc=1 参数，没有则加上。
-    3. 不在范围内直接返回 None，并同时提取出画廊 ID。
-    """
     parsed_url = urlparse(url)
     allowed_domains = ["e-hentai.org", "exhentai.org"]
     
     if parsed_url.netloc not in allowed_domains or not parsed_url.path.startswith("/g/"):
-        print("错误：输入的网址不在限定范围 (https://e-hentai.org/g/* 或 https://exhentai.org/g/*) 内。")
+        print("Invalid gallery URL. Only https://e-hentai.org/g/* and https://exhentai.org/g/* are allowed.")
         return None, None
     
-    # 从路径中提取画廊 ID，例如 /g/3707254/78bc70a6c6/ -> 3707254
     path_parts = [p for p in parsed_url.path.split('/') if p]
     gallery_id = path_parts[1] if len(path_parts) > 1 else "unknown"
     
-    # 处理查询参数
     query_params = parse_qs(parsed_url.query)
     if 'hc' not in query_params or query_params['hc'] != ['1']:
         query_params['hc'] = '1'
         
-    # 重新组装 URL
     new_query = urlencode(query_params, doseq=True)
     clean_url = urlunparse((
         parsed_url.scheme,
@@ -139,17 +270,302 @@ def process_url(url: str):
     ))
     return clean_url, gallery_id
 
+def process_uploader_url(url: str):
+    parsed_url = urlparse(url)
+    allowed_domains = ["e-hentai.org", "exhentai.org"]
+    if parsed_url.scheme not in ["http", "https"] or parsed_url.netloc not in allowed_domains:
+        print("Invalid uploader URL. Only e-hentai.org and exhentai.org are allowed.")
+        return None
+    return urlunparse((
+        "https",
+        parsed_url.netloc,
+        parsed_url.path,
+        parsed_url.params,
+        parsed_url.query,
+        parsed_url.fragment
+    ))
+
+# ==================== Gallery page diagnostics ====================
+def classify_missing_cdiv_reason(soup, url: str):
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    body_text = soup.get_text(" ", strip=True)
+    page_text = f"{title} {body_text}".lower()
+
+    content_warning_keywords = [
+        "content warning",
+        "view gallery",
+        "continue to gallery"
+    ]
+    permission_keywords = [
+        "you must be logged on",
+        "please log in",
+        "not have permission",
+        "insufficient privileges",
+        "access denied",
+        "forbidden"
+    ]
+    removed_keywords = [
+        "this gallery has been removed",
+        "gallery has been removed",
+        "expunged",
+        "removed or unavailable",
+        "this gallery is not available"
+    ]
+    unavailable_keywords = [
+        "gallery not found",
+        "404 not found",
+        "invalid gallery",
+        "temporarily unavailable",
+        "unavailable"
+    ]
+
+    if any(keyword in page_text for keyword in content_warning_keywords):
+        reason = "content_warning"
+    elif any(keyword in page_text for keyword in permission_keywords):
+        reason = "permission_denied"
+    elif any(keyword in page_text for keyword in removed_keywords):
+        reason = "gallery_removed_or_expunged"
+    elif any(keyword in page_text for keyword in unavailable_keywords):
+        reason = "gallery_unavailable"
+    elif extract_gallery_key(url) is None or "/g/" not in urlparse(url).path:
+        reason = "not_gallery_page"
+    else:
+        reason = "missing_comment_container"
+
+    return reason, title, body_text
+
+def diagnose_gallery_page_without_comments(soup, url: str, request_result=None):
+    request_result = request_result or {}
+    reason, title, body_text = classify_missing_cdiv_reason(soup, url)
+
+    if not is_debug_enabled():
+        print_missing_cdiv_summary(reason, request_result)
+        return reason
+
+    print_missing_cdiv_debug(reason, title, url, request_result, body_text)
+    return reason
+
+# ==================== Listing page parsing ====================
+def extract_gallery_urls_from_soup(soup, base_url: str):
+    urls = []
+    seen_keys = set()
+    gallery_href_pattern = re.compile(r'/g/\d+/[A-Za-z0-9]+/?')
+
+    for link in soup.find_all('a', href=gallery_href_pattern):
+        href = link.get('href')
+        full_url = urljoin(base_url, href)
+        clean_url, gallery_id = process_url(full_url)
+        if not clean_url or not gallery_id:
+            continue
+        key = extract_gallery_key(clean_url)
+        if key and key not in seen_keys:
+            seen_keys.add(key)
+            urls.append(clean_url)
+
+    return urls
+
+def discover_next_page_url(soup, current_url: str):
+    current_page = parse_qs(urlparse(current_url).query).get("page", ["0"])[0]
+
+    for link in soup.find_all('a', href=True):
+        text = link.get_text(" ", strip=True).lower()
+        href = link.get('href')
+        parsed_href = urlparse(urljoin(current_url, href))
+        href_query = parse_qs(parsed_href.query)
+        href_page = href_query.get("page", [None])[0]
+
+        if text in ["next", ">"] or "next" in text:
+            return urljoin(current_url, href)
+
+        if href_page is not None:
+            try:
+                if int(href_page) > int(current_page):
+                    return urljoin(current_url, href)
+            except ValueError:
+                continue
+
+    return None
+
+def build_incremental_page_url(current_url: str):
+    parsed_url = urlparse(current_url)
+    query_params = parse_qs(parsed_url.query)
+    current_page = query_params.get("page", ["0"])[0]
+    try:
+        next_page = int(current_page) + 1
+    except ValueError:
+        return None
+
+    return set_page_url(current_url, next_page)
+
+def collect_uploader_gallery_urls(uploader_url: str, start_page=None, end_page=None):
+    start_url = process_uploader_url(uploader_url)
+    if not start_url:
+        return []
+
+    visited_pages = set()
+    seen_gallery_keys = set()
+    gallery_urls = []
+
+    def scan_page(page_url: str):
+        visited_pages.add(page_url)
+        print(f"Scanning uploader page: {page_url}")
+
+        request_result = request_html(page_url)
+        if not request_result["ok"]:
+            print(
+                f"Uploader page request failed: {request_result['error']} "
+                f"| status_code={request_result['status_code']} | {page_url}"
+            )
+            return 0, None
+
+        html_content = request_result["html"]
+        soup = BeautifulSoup(html_content, 'html.parser')
+        page_gallery_urls = extract_gallery_urls_from_soup(soup, page_url)
+        new_count = 0
+
+        for gallery_url in page_gallery_urls:
+            key = extract_gallery_key(gallery_url)
+            if key and key not in seen_gallery_keys:
+                seen_gallery_keys.add(key)
+                gallery_urls.append(gallery_url)
+                new_count += 1
+
+        print(f"Found {new_count} new galleries on this page.")
+        return new_count, soup
+
+    if start_page is not None and end_page is not None:
+        for page_number in range(start_page, end_page + 1):
+            page_url = set_page_url(start_url, page_number)
+            if page_url in visited_pages:
+                continue
+            scan_page(page_url)
+            if page_number < end_page:
+                sleep_with_jitter()
+        return gallery_urls
+
+    page_url = start_url
+    while page_url and page_url not in visited_pages:
+        new_count, soup = scan_page(page_url)
+        if soup is None:
+            break
+
+        next_url = discover_next_page_url(soup, page_url)
+        if not next_url:
+            next_url = build_incremental_page_url(page_url)
+
+        if not next_url or next_url in visited_pages:
+            break
+
+        if new_count == 0:
+            # Stop the page=N fallback when a page no longer contributes galleries.
+            break
+
+        page_url = next_url
+        sleep_with_jitter()
+
+    return gallery_urls
+
+# ==================== Crawl orchestration ====================
+def crawl_uploader_galleries(uploader_url: str, start_page=None, end_page=None):
+    gallery_urls = collect_uploader_gallery_urls(uploader_url, start_page, end_page)
+    existing_gallery_ids = get_existing_gallery_ids()
+
+    total = len(gallery_urls)
+    skipped = 0
+    success = 0
+    failed = 0
+    total_comments = 0
+    failed_items = []
+    skipped_items = []
+    items = []
+
+    print(f"Discovered {total} galleries.")
+
+    for index, gallery_url in enumerate(gallery_urls, start=1):
+        key = extract_gallery_key(gallery_url)
+        gallery_id = key[0] if key else None
+
+        if gallery_id in existing_gallery_ids:
+            skipped += 1
+            skipped_items.append({
+                "gallery_id": gallery_id,
+                "url": gallery_url,
+                "reason": "already_exported"
+            })
+            items.append({
+                "gallery_id": gallery_id,
+                "url": gallery_url,
+                "status": "skipped_existing",
+                "comments": 0,
+                "reason": "already_exported"
+            })
+            print(f"[{index}/{total}] Skip existing gallery {gallery_id}: {gallery_url}")
+            continue
+
+        print(f"[{index}/{total}] Crawl gallery {gallery_id}: {gallery_url}")
+        result = crawl_comments(gallery_url)
+
+        if result and result.get("success"):
+            success += 1
+            comment_count = result.get("comments", 0)
+            total_comments += comment_count
+            items.append({
+                "gallery_id": gallery_id,
+                "url": gallery_url,
+                "status": "success",
+                "comments": comment_count,
+                "reason": None
+            })
+            if gallery_id:
+                existing_gallery_ids.add(gallery_id)
+        else:
+            failed += 1
+            reason = result.get("error") if result else "unknown_error"
+            failed_items.append({
+                "gallery_id": gallery_id,
+                "url": gallery_url,
+                "reason": reason
+            })
+            items.append({
+                "gallery_id": gallery_id,
+                "url": gallery_url,
+                "status": "failed",
+                "comments": 0,
+                "reason": reason
+            })
+
+        if index < total:
+            sleep_with_jitter()
+
+    report = {
+        "discovered": total,
+        "skipped_existing": skipped,
+        "succeeded": success,
+        "failed": failed,
+        "total_comments": total_comments,
+        "failed_items": failed_items,
+        "skipped_items": skipped_items,
+        "items": items
+    }
+
+    print("\nBatch report:")
+    print(f"  discovered: {report['discovered']}")
+    print(f"  skipped_existing: {report['skipped_existing']}")
+    print(f"  succeeded: {report['succeeded']}")
+    print(f"  failed: {report['failed']}")
+    print(f"  total_comments: {report['total_comments']}")
+    if failed_items:
+        print("  failed_items:")
+        for failed_item in failed_items:
+            print(f"    {failed_item['gallery_id']} | {failed_item['reason']} | {failed_item['url']}")
+
+    return report
+
 def parse_time(time_str: str) -> str:
-    """
-    处理时间格式。将时间转换为 ISO 8601 格式的时间戳。
-    由于 E-Hentai 画廊主站网页文本写死的时间就是 UTC+0，直接解析并格式化输出。
-    """
     time_str = time_str.strip()
     if "just now" in time_str.lower() or "刚刚" in time_str:
-        # 显式用 replace(tzinfo=None) 抹除时区属性，避免 isoformat() 产生 +00:00Z 的双重后缀
         return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     
-    # 尝试解析常见的时间格式
     formats = [
         "%d %B %Y, %H:%M",      # "04 June 2026, 12:39"
         "%d %B %Y, %H:%M:%S",   # "04 June 2026, 12:39:45"
@@ -168,48 +584,49 @@ def parse_time(time_str: str) -> str:
     return time_str
 
 def convert_to_mongodb_date(iso_timestamp: str) -> dict:
-    """
-    将 ISO 格式时间戳转换为 MongoDB $date 格式。
-    例如: "2021-12-31T16:00:00Z" -> {"$date": "2021-12-31T16:00:00Z"}
-    """
     if not iso_timestamp:
         return {"$date": ""}
     return {"$date": iso_timestamp}
 
 def crawl_comments(input_url: str):
-    # 1. 验证并处理 URL，同时拿到画廊 ID
     target_url, gallery_id = process_url(input_url)
     if not target_url:
-        return
+        return {"success": False, "gallery_id": None, "comments": 0, "error": "invalid_url"}
     
-    print(f"正在请求网址: {target_url}")
+    print(f"Requesting gallery: {target_url}")
     
-    # 2. 发起网络请求
-    try:
-        response = requests.get(target_url, headers=HEADERS, cookies=COOKIES, timeout=12)
-        response.raise_for_status()
-        html_content = response.text
-    except Exception as e:
-        print(f"网络请求失败: {e}")
-        return
+    request_result = request_html(target_url)
+    if not request_result["ok"]:
+        return {
+            "success": False,
+            "gallery_id": gallery_id,
+            "comments": 0,
+            "error": request_result["error"],
+            "status_code": request_result["status_code"]
+        }
 
-    # 3. 解析 HTML 结构
+    html_content = request_result["html"]
+
     soup = BeautifulSoup(html_content, 'html.parser')
     comments_list = []
-    edits_list = []  # 存放分离出来的编辑记录数据
+    edits_list = []
     
     cdiv = soup.find('div', id='cdiv')
+
     if not cdiv:
-        print("未在页面中找到评论区容器 (#cdiv)。请确认您的 Cookies 是否有效且拥有相应权限。")
-        return
+        reason = diagnose_gallery_page_without_comments(
+            soup,
+            target_url,
+            request_result=request_result
+        )
+        return {"success": False, "gallery_id": gallery_id, "comments": 0, "error": reason}
         
-    uploader_comment = ""  # 用于存放上传者置顶评论内容
+    uploader_comment = ""
     anchors = cdiv.find_all('a', attrs={'name': re.compile(r'^c\d+$')})
     
     for anchor in anchors:
         anchor_name = anchor.get('name')
         
-        # 严格过滤置顶评论 c0
         if anchor_name == 'c0':
             comment_div = anchor.find_next_sibling('div')
             if comment_div:
@@ -225,7 +642,6 @@ def crawl_comments(input_url: str):
         if not comment_div:
             continue
             
-        # 提取发送人、原始发送时间以及论坛用户 ID (对应 class="c3")
         c3_div = comment_div.find('div', class_='c3')
         username = "Unknown"
         post_time = None
@@ -252,7 +668,6 @@ def crawl_comments(input_url: str):
                     extracted_user_id = id_match.group(1)
                     extracted_forums_url = f"https://forums.e-hentai.org/index.php?showuser={extracted_user_id}"
                 
-        # 提取当前评论分数 current_score
         score_span = comment_div.find('span', id=f'comment_score_{comment_id}')
         current_score = 0
         if score_span:
@@ -261,7 +676,6 @@ def crawl_comments(input_url: str):
             except ValueError:
                 pass
 
-        # 提取评论者基础权限分 power 与具体的投票列表 vote_list
         c7_div = comment_div.find('div', id=f'cvotes_{comment_id}')
         if not c7_div:
             c7_div = comment_div.find('div', class_='c7')
@@ -286,18 +700,15 @@ def crawl_comments(input_url: str):
                         "power": voter_power
                     })
 
-        # 提取评论内容
         c6_div = comment_div.find('div', id=f'comment_{comment_id}')
         if not c6_div:
             c6_div = comment_div.find('div', class_='c6')
         
         content_html = "".join(str(child) for child in c6_div.children) if c6_div else ""
         
-        # 检查是否修改过 (通过 class="c8")
         c8_divs = comment_div.find_all('div', class_='c8')
         is_edited = len(c8_divs) > 0
         
-        # 收集分离出来的修改历史
         for c8 in c8_divs:
             c8_text = c8.get_text()
             edit_time_match = re.search(r'on\s+(.*)', c8_text)
@@ -315,9 +726,9 @@ def crawl_comments(input_url: str):
                 "edit_content": edit_content
             })
             
-        # 封装评论主数据字典
         comment_data = {
-            "_id": comment_id,
+            "_id": f"{gallery_id}:{comment_id}",
+            "comment_id": comment_id,
             "gallery_id": gallery_id,
             "username": username,
             "post_time": post_time,
@@ -338,20 +749,16 @@ def crawl_comments(input_url: str):
         
         comments_list.append(comment_data)
         
-    # 在主体 DOM 树中独立提取画廊上传者信息
     gdn_div = soup.find('div', id='gdn')
     
-    # 动态执行时间保持标准的 UTC+0 瞬间时间
     utc_now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
     
-    # 优化点：初始化基础属性，排除 uploader_comment 和 comment_sha256
     uploader_data = {
         "gallery_id": gallery_id,
         "source_url": target_url,
         "time": convert_to_mongodb_date(utc_now_str)
     }
     
-    # 仅在存在上传者置顶评论时，动态计算 SHA-256 并将其写入字典中
     if uploader_comment:
         comment_digest = hashlib.sha256(uploader_comment.encode('utf-8')).hexdigest()
         uploader_data["uploader_comment"] = uploader_comment
@@ -368,87 +775,117 @@ def crawl_comments(input_url: str):
             if id_match:
                 uploader_data["uploader_id"] = id_match.group(1)
         
-    # 4. 导出文件
-    if comments_list or uploader_data:
+    if comments_list:
         save_all_data(comments_list, edits_list, uploader_data, gallery_id)
         
     if not comments_list:
-        print("未抓取到有效评论。请检查该画廊下是否有评论，或者确认你的 Cookies 是否已失效。")
+        print("No valid comments found. Check whether this gallery has comments or whether cookies are valid.")
+
+    return {"success": True, "gallery_id": gallery_id, "comments": len(comments_list), "error": None}
+
+# ==================== Storage helpers ====================
+def write_json(path: str, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_existing_gallery_ids():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    comments_dir = os.path.join(current_dir, "comments")
+    if not os.path.exists(comments_dir):
+        return set()
+
+    return {
+        match.group(1)
+        for filename in os.listdir(comments_dir)
+        for match in [re.match(r'^(\d+)-\d+\.json$', filename)]
+        if match
+    }
 
 def save_all_data(comments_list, edits_list, uploader_data, gallery_id: str):
-    """
-    分别导出评论主数据、编辑历史数据与画廊上传者数据到对应的指定文件夹中。
-    """
     current_dir = os.path.dirname(os.path.abspath(__file__))
     timestamp = int(time.time())
     filename = f"{gallery_id}-{timestamp}.json"
     filename_edit = f"{gallery_id}-{timestamp}-edits.json"
     filename_uploader = f"{gallery_id}-{timestamp}-uploader.json"
     
-    # --- 1. 存储评论主数据 ---
-    if comments_list:
-        comments_dir = os.path.join(current_dir, "comments")
-        if not os.path.exists(comments_dir):
-            os.makedirs(comments_dir)
-        comments_path = os.path.join(comments_dir, filename)
-        
-        with open(comments_path, "w", encoding="utf-8") as f:
-            json.dump(comments_list, f, ensure_ascii=False, indent=2)
-        print(f"评论主数据已存储至: {comments_path}")
+    comments_path = os.path.join(current_dir, "comments", filename)
+    write_json(comments_path, comments_list)
+    print(f"Saved comments: {comments_path}")
     
-    # --- 2. 存储编辑历史数据 ---
     if len(edits_list) > 0:
-        edits_dir = os.path.join(current_dir, "comment_edits")
-        if not os.path.exists(edits_dir):
-            os.makedirs(edits_dir)
-        edits_path = os.path.join(edits_dir, filename_edit)
+        edits_path = os.path.join(current_dir, "comment_edits", filename_edit)
+        write_json(edits_path, edits_list)
+        print(f"Saved comment edits: {edits_path}")
         
-        with open(edits_path, "w", encoding="utf-8") as f:
-            json.dump(edits_list, f, ensure_ascii=False, indent=2)
-        print(f"编辑历史数据已存储至: {edits_path}")
-    else:
-        print("没有编辑历史数据需要存储。")
-        
-    # --- 3. 存储画廊上传者信息数据 ---
     if uploader_data:
-        uploader_dir = os.path.join(current_dir, "gallery_uploaders")
-        if not os.path.exists(uploader_dir):
-            os.makedirs(uploader_dir)
-        uploader_path = os.path.join(uploader_dir, filename_uploader)
-        
-        with open(uploader_path, "w", encoding="utf-8") as f:
-            json.dump([uploader_data], f, ensure_ascii=False, indent=2)
-        print(f"画廊上传者评论数据已存储至: {uploader_path}")
+        uploader_path = os.path.join(current_dir, "gallery_uploaders", filename_uploader)
+        write_json(uploader_path, [uploader_data])
+        print(f"Saved uploader metadata: {uploader_path}")
 
-# ----------------- 测试运行 -----------------
-if __name__ == "__main__":
+# ==================== CLI helpers and main ====================
+def print_single_gallery_result(result: dict):
+    status = "success" if result and result.get("success") else "failed"
+    gallery_id = result.get("gallery_id") if result else None
+    comments = result.get("comments") if result else 0
+    error = result.get("error") if result else "unknown_error"
+    print("\nSingle gallery result:")
+    print(f"  status: {status}")
+    print(f"  gallery_id: {gallery_id}")
+    print(f"  comments: {comments}")
+    print(f"  error: {error}")
+
+# ----------------- Main -----------------
+def main():
     print("=" * 50)
-    print("E-Hentai 评论与画廊信息爬虫 - 交互模式")
+    print("E-Hentai comment crawler - interactive mode")
     print("=" * 50)
-    
-    # 询问用户 Cookie 配置方案
-    config_result = ask_config_choice()
-    
+
+    config_result = load_runtime_cookies()
+
     if config_result is None:
-        # 用户选择退出
         exit(0)
-    
-    # 更新全局 COOKIES 变量
-    COOKIES = config_result
-    
-    print("\n开始爬虫任务...")
-    
+
+    SESSION.cookies.clear()
+    SESSION.cookies.update(config_result)
+
+    print("\nCrawler ready.")
+
     while True:
-        user_input = input("\n请输入 E-Hentai/ExHentai 画廊网址（或输入 \'exit\' 或 \'quit\' 退出）:\n> ").strip()
-        
-        if user_input.lower() in ['quit', 'exit', 'q']:
-            print("程序已退出。")
+        print("\nMode:")
+        print("1 - Crawl one gallery URL")
+        print("2 - Crawl galleries from one uploader/listing URL")
+        print("Input 'exit' or 'quit' to exit")
+        mode = input("> ").strip().lower()
+
+        if mode in ['quit', 'exit', 'q']:
+            print("Program exited.")
             break
-        
-        if not user_input:
-            print("错误：请输入有效的网址。")
+
+        if mode not in ['1', '2']:
+            print("Invalid input. Please enter 1, 2, exit, or quit.")
             continue
-        
+
+        if mode == '1':
+            user_input = input("\nInput E-Hentai/ExHentai gallery URL:\n> ").strip()
+            if not user_input:
+                print("Please input a valid URL.")
+                continue
+            print()
+            print_single_gallery_result(crawl_comments(user_input))
+        else:
+            user_input = input("\nInput uploader/listing URL:\n> ").strip()
+            if not user_input:
+                print("Please input a valid URL.")
+                continue
+            page_range_input = input("\nInput page range (empty=auto, 0-3, or 2):\n> ").strip()
+            try:
+                start_page, end_page = parse_page_range(page_range_input)
+                crawl_uploader_galleries(user_input, start_page, end_page)
+            except ValueError as e:
+                print(f"Invalid page range: {e}")
+                continue
         print()
-        crawl_comments(user_input)
-        print()
+
+if __name__ == "__main__":
+    main()
