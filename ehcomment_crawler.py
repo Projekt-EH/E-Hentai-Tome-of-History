@@ -624,6 +624,8 @@ def crawl_comments(input_url: str):
     uploader_comment = ""
     anchors = cdiv.find_all('a', attrs={'name': re.compile(r'^c\d+$')})
     
+    utc_now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
     for anchor in anchors:
         anchor_name = anchor.get('name')
         
@@ -725,7 +727,7 @@ def crawl_comments(input_url: str):
                 "edit_time": mongodb_edit_time,
                 "edit_content": edit_content
             })
-            
+
         comment_data = {
             "_id": f"{gallery_id}:{comment_id}",
             "comment_id": comment_id,
@@ -736,7 +738,8 @@ def crawl_comments(input_url: str):
             "current_score": current_score,
             "power": power,
             "vote_list": vote_list,
-            "is_edited": is_edited
+            "is_edited": is_edited,
+            "fetch_time": convert_to_mongodb_date(utc_now_str)
         }
         
         if extracted_user_id:
@@ -750,8 +753,6 @@ def crawl_comments(input_url: str):
         comments_list.append(comment_data)
         
     gdn_div = soup.find('div', id='gdn')
-    
-    utc_now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
     
     uploader_data = {
         "gallery_id": gallery_id,
@@ -774,12 +775,9 @@ def crawl_comments(input_url: str):
             id_match = re.search(r'showuser=(\d+)', forums_a.get('href', ''))
             if id_match:
                 uploader_data["uploader_id"] = id_match.group(1)
-        
-    if comments_list:
+
+    if comments_list or uploader_data:
         save_all_data(comments_list, edits_list, uploader_data, gallery_id)
-        
-    if not comments_list:
-        print("No valid comments found. Check whether this gallery has comments or whether cookies are valid.")
 
     return {"success": True, "gallery_id": gallery_id, "comments": len(comments_list), "error": None}
 
@@ -808,20 +806,26 @@ def save_all_data(comments_list, edits_list, uploader_data, gallery_id: str):
     filename = f"{gallery_id}-{timestamp}.json"
     filename_edit = f"{gallery_id}-{timestamp}-edits.json"
     filename_uploader = f"{gallery_id}-{timestamp}-uploader.json"
-    
-    comments_path = os.path.join(current_dir, "comments", filename)
-    write_json(comments_path, comments_list)
-    print(f"Saved comments: {comments_path}")
+    message = ""
+
+    if len(comments_list) == 0:
+        message += "No comments found in this gallery."
+    else:
+        comments_path = os.path.join(current_dir, "comments", filename)
+        write_json(comments_path, comments_list)
+        message += f"Saved comments: {comments_path}"
     
     if len(edits_list) > 0:
         edits_path = os.path.join(current_dir, "comment_edits", filename_edit)
         write_json(edits_path, edits_list)
-        print(f"Saved comment edits: {edits_path}")
-        
+        message += f"Saved comment edits: {edits_path}"
+
     if uploader_data:
         uploader_path = os.path.join(current_dir, "gallery_uploaders", filename_uploader)
         write_json(uploader_path, [uploader_data])
-        print(f"Saved uploader metadata: {uploader_path}")
+        message += f"Saved uploader metadata: {uploader_path}"
+    message += "\n"
+    print(message)
 
 # ==================== CLI helpers and main ====================
 def print_single_gallery_result(result: dict):
