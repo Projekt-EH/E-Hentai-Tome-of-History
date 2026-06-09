@@ -728,9 +728,10 @@ def crawl_comments(input_url: str):
                 "edit_content": edit_content
             })
 
+        # _id MUST be comment_id for proper indexing and upsert operations in MongoDB
+        # Taking gallery updates into consideration, we should not use a composite key of gallery_id + comment_id, as comment_id will change in an update.
         comment_data = {
-            "_id": f"{gallery_id}:{comment_id}",
-            "comment_id": comment_id,
+            "_id": comment_id,
             "gallery_id": gallery_id,
             "username": username,
             "post_time": post_time,
@@ -814,12 +815,12 @@ def save_all_data(comments_list, edits_list, uploader_data, gallery_id: str):
         comments_path = os.path.join(current_dir, "comments", filename)
         write_json(comments_path, comments_list)
         message += f"Saved comments: {comments_path}"
-    
+    message +="\n"
     if len(edits_list) > 0:
         edits_path = os.path.join(current_dir, "comment_edits", filename_edit)
         write_json(edits_path, edits_list)
-        message += f"Saved comment edits: {edits_path}"
-
+        message += f"Saved comment edits: {edits_path}\n"
+    
     if uploader_data:
         uploader_path = os.path.join(current_dir, "gallery_uploaders", filename_uploader)
         write_json(uploader_path, [uploader_data])
