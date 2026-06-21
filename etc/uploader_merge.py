@@ -2,7 +2,7 @@ import os
 import json
 import time
 import pandas as pd
-def merge_json(directory_path):
+def merge_uploader(directory_path):
     uploader_list=[]
     delete_files = []
     # 确保路径存在
@@ -47,8 +47,9 @@ def merge_json(directory_path):
     for file in delete_files:
         os.remove(file)
 
+
 if __name__ == "__main__":
     # 指定路径，替换成你的路径
     folder_path = os.path.dirname(__file__)
     target_path = os.path.join(os.path.dirname(folder_path), 'gallery_uploaders') 
-    merge_json(target_path)
+    merge_uploader(target_path)

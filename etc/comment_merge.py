@@ -3,7 +3,7 @@ import json
 import time
 import pandas as pd
 
-def merge_json(directory_path):
+def merge_comment(directory_path):
     comment_list = []
     delete_files = []
     
@@ -123,4 +123,4 @@ def merge_json(directory_path):
 if __name__ == "__main__":
     folder_path=os.path.dirname(__file__)
     target_path = os.path.join(os.path.dirname(folder_path), 'comments') 
-    merge_json(target_path)
+    merge_comment(target_path)

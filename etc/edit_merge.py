@@ -3,7 +3,7 @@ import json
 import time
 import pandas as pd
 
-def merge_json(directory_path):
+def merge_edit(directory_path):
     data_list = []
     delete_files = []
     # 确保路径存在
@@ -77,4 +77,4 @@ if __name__ == "__main__":
     # 指定路径，替换成你的路径
     folder_path=os.path.dirname(__file__)
     target_path = os.path.join(os.path.dirname(folder_path), 'comment_edits') 
-    merge_json(target_path)
+    merge_edit(target_path)
