@@ -5,6 +5,7 @@ from utils.batch_crawling import crawl_uploader_galleries
 from utils.crawl import crawl_comments
 
 from etc.comment_merge import merge_comment
+import argparse
 from etc.edit_merge import merge_edit
 from etc.uploader_merge import merge_uploader
 
@@ -22,12 +23,11 @@ def print_single_gallery_result(result: dict):
     print(f"  error: {error}")
 
 # ----------------- Main -----------------
-def main():
+def main(max_workers=15):
     print("=" * 50)
     print("E-Hentai comment crawler - interactive mode")
     print("=" * 50)
-    
-    print("\nCrawler ready.")
+    print(f"Parallel crawl workers: {max_workers}")
 
     while True:
         print("\nMode:")
@@ -70,7 +70,7 @@ def main():
                 except ValueError as e:
                     print(f"Invalid page depth: {e}")
                     continue
-            crawl_uploader_galleries(user_input, page_depth)
+            crawl_uploader_galleries(user_input, page_depth, max_workers=max_workers)
         else:
             # JSON merging utility
             print("Starting JSON merging utility...")
@@ -80,4 +80,9 @@ def main():
         print()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="E-Hentai comment crawler")
+    parser.add_argument("-p", "--parallel", type=int, default=15,
+                        help="Max parallel workers for uploader/listing crawling (1-20, default: 15)")
+    args = parser.parse_args()
+    max_workers = max(1, min(args.parallel, 20))
+    main(max_workers=max_workers)
