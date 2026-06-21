@@ -52,7 +52,7 @@ def build_incremental_page_url(current_url: str):
     return set_page_url(current_url, next_page)
 """
 
-def collect_uploader_gallery_urls(uploader_url: str, start_page=None, end_page=None):
+def collect_uploader_gallery_urls(uploader_url: str, page_depth=None):
     start_url = process_uploader_url(uploader_url)
     if not start_url:
         return []
@@ -65,7 +65,7 @@ def collect_uploader_gallery_urls(uploader_url: str, start_page=None, end_page=N
         visited_pages.add(page_url)
         print(f"Scanning uploader page: {page_url}")
 
-        request_result = request_html(page_url,SESSION)
+        request_result = request_html(page_url, SESSION)
         if not request_result["ok"]:
             print(
                 f"Uploader page request failed: {request_result['error']} "
@@ -88,34 +88,22 @@ def collect_uploader_gallery_urls(uploader_url: str, start_page=None, end_page=N
         print(f"Found {new_count} new galleries on this page.")
         return new_count, soup
 
-    # currently page range is invalid
-    if start_page is not None and end_page is not None:
-        for page_number in range(start_page, end_page + 1):
-            page_url = set_page_url(start_url, page_number)
-            if page_url in visited_pages:
-                continue
-            scan_page(page_url)
-            if page_number < end_page:
-                sleep_with_jitter()
-        return gallery_urls
-
-    # auto page discovery
     page_url = start_url
+    depth = 0
     while page_url and page_url not in visited_pages:
         new_count, soup = scan_page(page_url)
         if soup is None:
             break
 
-        next_url = discover_next_page_url(soup, page_url)
+        if page_depth is not None and depth >= page_depth:
+            break
 
+        next_url = discover_next_page_url(soup, page_url)
         if not next_url or next_url in visited_pages:
             break
 
-        if new_count == 0:
-            # Stop the page=N fallback when a page no longer contributes galleries.
-            break
-
         page_url = next_url
+        depth += 1
         sleep_with_jitter()
 
     return gallery_urls

@@ -1,7 +1,6 @@
 from utils.debug_mode import DEBUG_MODE
 from utils.config import load_runtime_cookies
 from utils.constants import REQUEST_DELAY_MS, REQUEST_DELAY_JITTER, HEADERS
-from utils.urlfetch import parse_page_range
 from utils.batch_crawling import crawl_uploader_galleries
 from utils.crawl import crawl_comments
 
@@ -52,13 +51,18 @@ def main():
             if not user_input:
                 print("Please input a valid URL.")
                 continue
-            page_range_input = input("\nInput page range (empty=auto, 0-3, or 2):\n> ").strip()
-            try:
-                start_page, end_page = parse_page_range(page_range_input)
-                crawl_uploader_galleries(user_input, start_page, end_page)
-            except ValueError as e:
-                print(f"Invalid page range: {e}")
-                continue
+            page_depth_input = input("\nInput page depth (empty=auto, 0=first page only, N=click next N times):\n> ").strip()
+            if page_depth_input == "":
+                page_depth = None
+            else:
+                try:
+                    page_depth = int(page_depth_input)
+                    if page_depth < 0:
+                        raise ValueError("page depth must be >= 0")
+                except ValueError as e:
+                    print(f"Invalid page depth: {e}")
+                    continue
+            crawl_uploader_galleries(user_input, page_depth)
         print()
 
 if __name__ == "__main__":

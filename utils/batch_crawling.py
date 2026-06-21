@@ -3,8 +3,8 @@ from .savejson import get_existing_gallery_ids
 from .urlfetch import *
 from .crawl import crawl_comments
 # ==================== Crawl orchestration ====================
-def crawl_uploader_galleries(uploader_url: str, start_page=None, end_page=None):
-    gallery_urls = collect_uploader_gallery_urls(uploader_url, start_page, end_page)
+def crawl_uploader_galleries(uploader_url: str, page_depth=None):
+    gallery_urls = collect_uploader_gallery_urls(uploader_url, page_depth)
     existing_gallery_ids = get_existing_gallery_ids()
 
     total = len(gallery_urls)
