@@ -4,3 +4,4 @@ venv
 *.json
 **/*.json
 **/__pycache__
+*.zip
