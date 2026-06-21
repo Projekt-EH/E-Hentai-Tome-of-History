@@ -1,26 +1,17 @@
+import argparse
+import os
+
 from utils.debug_mode import DEBUG_MODE
 from utils.config import load_runtime_cookies
 from utils.constants import REQUEST_DELAY_MS, REQUEST_DELAY_JITTER, HEADERS
 from utils.batch_crawling import crawl_uploader_galleries
 from utils.crawl import crawl_comments
+from utils.auto_mode import print_single_gallery_result, run_auto_mode, get_default_auto_config_path
 
 from etc.comment_merge import merge_comment
-import argparse
 from etc.edit_merge import merge_edit
 from etc.uploader_merge import merge_uploader
 
-import os
-# ==================== CLI helpers and main ====================
-def print_single_gallery_result(result: dict):
-    status = "success" if result and result.get("success") else "failed"
-    gallery_id = result.get("gallery_id") if result else None
-    comments = result.get("comments") if result else 0
-    error = result.get("error") if result else "unknown_error"
-    print("\nSingle gallery result:")
-    print(f"  status: {status}")
-    print(f"  gallery_id: {gallery_id}")
-    print(f"  comments: {comments}")
-    print(f"  error: {error}")
 
 # ----------------- Main -----------------
 def main(max_workers=15):
@@ -34,6 +25,7 @@ def main(max_workers=15):
         print("1 - Crawl one gallery URL")
         print("2 - Crawl galleries from one uploader/listing URL")
         print("3 - Run JSON merging utility (for merging/summarizing previously saved JSON files)")
+        print("4 - Run auto jobs")
         print("Input 'exit' or 'quit' to exit")
         mode = input("> ").strip().lower()
 
@@ -41,8 +33,8 @@ def main(max_workers=15):
             print("Program exited.")
             break
 
-        if mode not in ['1', '2','3']:
-            print("Invalid input. Please enter 1, 2, exit, or quit.")
+        if mode not in ['1', '2', '3', '4']:
+            print("Invalid input. Please enter 1, 2, 3, 4, exit, or quit.")
             continue
 
         if mode == '1':
@@ -71,18 +63,29 @@ def main(max_workers=15):
                     print(f"Invalid page depth: {e}")
                     continue
             crawl_uploader_galleries(user_input, page_depth, max_workers=max_workers)
-        else:
+        elif mode == '3':
             # JSON merging utility
             print("Starting JSON merging utility...")
             merge_comment(os.path.join(os.path.dirname(__file__), 'comments'))
             merge_edit(os.path.join(os.path.dirname(__file__), 'comment_edits'))
             merge_uploader(os.path.join(os.path.dirname(__file__), 'gallery_uploaders'))
+        else:
+            # Auto mode
+            config_path = input("\nInput auto jobs JSON path (empty=auto_jobs.json):\n> ").strip()
+            run_auto_mode(config_path or get_default_auto_config_path(), max_workers=max_workers)
         print()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="E-Hentai comment crawler")
     parser.add_argument("-p", "--parallel", type=int, default=15,
                         help="Max parallel workers for uploader/listing crawling (1-20, default: 15)")
+    parser.add_argument("--auto", nargs="?", const=get_default_auto_config_path(),
+                        help="Run auto mode with an optional auto_jobs.json path.")
     args = parser.parse_args()
     max_workers = max(1, min(args.parallel, 20))
+
+    if args.auto is not None:
+        exit(run_auto_mode(args.auto, max_workers=max_workers))
+
     main(max_workers=max_workers)
