@@ -3,3 +3,4 @@ comment_edits
 venv
 *.json
 **/*.json
+**/__pycache__

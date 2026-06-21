@@ -75,5 +75,6 @@ def merge_json(directory_path):
 
 if __name__ == "__main__":
     # 指定路径，替换成你的路径
-    directory_path = os.path.join(os.path.dirname(__file__),'comment_edits') 
-    merge_json(directory_path)
+    folder_path=os.path.dirname(__file__)
+    target_path = os.path.join(os.path.dirname(folder_path), 'comment_edits') 
+    merge_json(target_path)

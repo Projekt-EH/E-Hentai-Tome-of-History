@@ -121,5 +121,6 @@ def merge_json(directory_path):
         os.remove(file)
 
 if __name__ == "__main__":
-    directory_path = os.path.join(os.path.dirname(__file__), 'comments') 
-    merge_json(directory_path)
+    folder_path=os.path.dirname(__file__)
+    target_path = os.path.join(os.path.dirname(folder_path), 'comments') 
+    merge_json(target_path)
