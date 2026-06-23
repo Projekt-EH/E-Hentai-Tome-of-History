@@ -4,21 +4,11 @@ import time
 import random
 from datetime import datetime, timedelta
 
+from mongoutils import DataBuffer
 from .urlfetch import sleep_with_jitter
 from .crawl import crawl_comments
 from .batch_crawling import crawl_uploader_galleries
-
-
-def print_single_gallery_result(result: dict):
-    status = "success" if result and result.get("success") else "failed"
-    gallery_id = result.get("gallery_id") if result else None
-    comments = result.get("comments") if result else 0
-    error = result.get("error") if result else "unknown_error"
-    print("\nSingle gallery result:")
-    print(f"  status: {status}")
-    print(f"  gallery_id: {gallery_id}")
-    print(f"  comments: {comments}")
-    print(f"  error: {error}")
+from .result import print_single_gallery_result, print_batch_crawling_report
 
 
 def get_default_auto_config_path():
@@ -129,23 +119,31 @@ def normalize_gallery_urls(job: dict):
     return urls
 
 
-def run_gallery_job(job: dict):
+def run_gallery_job(job: dict, client=None):
     urls = normalize_gallery_urls(job)
+    if client is None:
+        raise ValueError("A MongoDB client is required for gallery jobs.")
+
+    data_buffer = DataBuffer(client)
     for index, url in enumerate(urls, start=1):
         print(f"Auto gallery job [{index}/{len(urls)}]: {url}")
         try:
-            print_single_gallery_result(crawl_comments(url))
+            print_single_gallery_result(crawl_comments(client, url, data_buffer=data_buffer))
         except Exception as e:
             print(f"Auto gallery job failed: {e}")
         if index < len(urls):
             sleep_with_jitter()
+    data_buffer.flush()
 
 
-def run_uploader_job(job: dict, max_workers: int = 15):
+def run_uploader_job(job: dict, max_workers: int = 15, client=None):
     url = job.get("url")
     if not isinstance(url, str) or not url.strip():
         print("Uploader job requires url.")
         return
+
+    if client is None:
+        raise ValueError("A MongoDB client is required for uploader jobs.")
 
     page_depth_raw = job.get("page_depth")
     if page_depth_raw is None or str(page_depth_raw).strip() == "":
@@ -159,19 +157,21 @@ def run_uploader_job(job: dict, max_workers: int = 15):
             print(f"Invalid uploader job page_depth: {page_depth_raw}")
             return
 
-    crawl_uploader_galleries(url.strip(), page_depth, max_workers=max_workers)
+    report = crawl_uploader_galleries(url.strip(), page_depth, max_workers=max_workers, client=client)
+    if report:
+        print_batch_crawling_report(report)
 
 
-def run_auto_jobs(jobs, max_workers: int = 15):
+def run_auto_jobs(jobs, max_workers: int = 15, client=None):
     enabled_jobs = [job for job in jobs if isinstance(job, dict) and job.get("enabled", True)]
     for index, job in enumerate(enabled_jobs, start=1):
         job_type = job.get("type")
         print(f"\nAuto job [{index}/{len(enabled_jobs)}]: {job_type or 'unknown'}")
         try:
             if job_type == "gallery":
-                run_gallery_job(job)
+                run_gallery_job(job, client=client)
             elif job_type == "uploader":
-                run_uploader_job(job, max_workers=max_workers)
+                run_uploader_job(job, max_workers=max_workers, client=client)
             else:
                 print(f"Unsupported auto job type: {job_type}")
         except Exception as e:
@@ -194,7 +194,7 @@ def sleep_until_or_stop(seconds: float, end_at):
         time.sleep(max(0, (next_wake - now).total_seconds()))
 
 
-def run_auto_mode(config_path: str, max_workers: int = 15):
+def run_auto_mode(config_path: str, max_workers: int = 15, client=None):
     config_path = config_path or get_default_auto_config_path()
     print(f"Auto mode config: {config_path}")
 
@@ -222,7 +222,7 @@ def run_auto_mode(config_path: str, max_workers: int = 15):
                 continue
 
             print(f"\nAuto mode round started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            run_auto_jobs(config.get("jobs", []), max_workers=max_workers)
+            run_auto_jobs(config.get("jobs", []), max_workers=max_workers, client=client)
 
             sleep_seconds = get_interval_sleep_seconds(config)
             print(f"Auto mode sleeping {sleep_seconds / 60:.2f} minutes before next round.")

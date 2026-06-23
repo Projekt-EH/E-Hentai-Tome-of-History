@@ -94,10 +94,13 @@ def extract_gallery_key(url: str):
 def get_delay_seconds() -> float:
     base_seconds = REQUEST_DELAY_MS / 1000
     jitter_seconds = base_seconds * REQUEST_DELAY_JITTER
-    return random.uniform(base_seconds - jitter_seconds, base_seconds + jitter_seconds)
+    delay_seconds = random.uniform(base_seconds - jitter_seconds, base_seconds + jitter_seconds)
+    return 0.650 if delay_seconds< 0.650 else delay_seconds
 
 def sleep_with_jitter():
     time.sleep(get_delay_seconds())
+
+# deprecated
 
 def parse_page_range(page_range_text: str):
     text = page_range_text.strip()
@@ -119,6 +122,7 @@ def parse_page_range(page_range_text: str):
 
     return start_page, end_page
 
+    
 def set_page_url(url: str, page_number: int):
     parsed_url = urlparse(url)
     query_params = parse_qs(parsed_url.query)

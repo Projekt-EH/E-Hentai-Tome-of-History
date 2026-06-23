@@ -1,10 +1,11 @@
 import hashlib
 import re
+
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
 from .urlfetch import SESSION, process_url, request_html, diagnose_gallery_page_without_comments
-from .savejson import save_all_data
+from mongoutils import DataBuffer
 
 def parse_time(time_str: str) -> str:
     time_str = time_str.strip()
@@ -28,12 +29,27 @@ def parse_time(time_str: str) -> str:
     
     return time_str
 
-def convert_to_mongodb_date(iso_timestamp: str) -> dict:
+def convert_to_mongodb_date(iso_timestamp: str):
+    """
+    Convert an ISO 8601 timestamp string to a Python datetime object.
+    Returns None for empty/invalid input so MongoDB stores it as null.
+    """
     if not iso_timestamp:
-        return {"$date": ""}
-    return {"$date": iso_timestamp}
+        return None
+    try:
+        normalized = iso_timestamp.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
 
-def crawl_comments(input_url: str):
+def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None):
+    """
+    For single gallery, data_buffer can be None, and the function will create a temporary DataBuffer to flush data immediately.
+    For batch crawling, a shared DataBuffer should be provided to accumulate results and flush later.
+    """
     target_url, gallery_id = process_url(input_url)
     if not target_url:
         return {"success": False, "gallery_id": None, "comments": 0, "error": "invalid_url"}
@@ -222,7 +238,22 @@ def crawl_comments(input_url: str):
             if id_match:
                 uploader_data["uploader_id"] = id_match.group(1)
 
-    if comments_list or uploader_data:
-        save_all_data(comments_list, edits_list, uploader_data, gallery_id)
+    result = {
+        "success": True,
+        "gallery_id": gallery_id,
+        "comments": len(comments_list),
+        "error": None
+    }
 
-    return {"success": True, "gallery_id": gallery_id, "comments": len(comments_list), "error": None}
+    if comments_list or edits_list or uploader_data:
+        buffer = data_buffer
+        # single gallery crawl, create a temporary DataBuffer to flush immediately
+        if buffer is None:
+            buffer = DataBuffer(mongo_client)
+        buffer.add_gallery_result(comments_list, edits_list, [uploader_data] if uploader_data else [])
+        # flush immediately for single gallery crawl
+        if data_buffer is None:
+            buffer.flush()
+            result["db_stats"] = buffer.get_stats()
+
+    return result
