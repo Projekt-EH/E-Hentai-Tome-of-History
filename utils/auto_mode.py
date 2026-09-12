@@ -4,11 +4,9 @@ import time
 import random
 from datetime import datetime, timedelta
 
-from mongoutils import DataBuffer, get_comment_deletion_tracker
-from .urlfetch import sleep_with_jitter, extract_gallery_key
-from .crawl import crawl_comments
-from .batch_crawling import crawl_uploader_galleries
-from .result import print_single_gallery_result, print_batch_crawling_report
+from .urlfetch import sleep_with_jitter
+from .batch_crawling import crawl_uploader_galleries, crawl_gallery_urls
+from .result import print_batch_crawling_report
 
 
 def get_default_auto_config_path():
@@ -124,34 +122,9 @@ def run_gallery_job(job: dict, client=None):
     if client is None:
         raise ValueError("A MongoDB client is required for gallery jobs.")
 
-    data_buffer = DataBuffer(client)
-
-    # Deletion detection for the whole job: snapshot the comments we already store for every
-    # gallery of the job before the first request, exactly like batch crawling does.
-    deletion_tracker = get_comment_deletion_tracker(client)
-    if deletion_tracker is not None:
-        gallery_ids = []
-        for url in urls:
-            key = extract_gallery_key(url)
-            if key:
-                gallery_ids.append(key[0])
-        snapshotted = deletion_tracker.prefetch(gallery_ids)
-        print(f"Comment deletion check: snapshotted existing comments of {snapshotted} gallery/galleries.")
-
-    for index, url in enumerate(urls, start=1):
-        print(f"Auto gallery job [{index}/{len(urls)}]: {url}")
-        try:
-            print_single_gallery_result(
-                crawl_comments(client, url, data_buffer=data_buffer, deletion_tracker=deletion_tracker)
-            )
-        except Exception as e:
-            print(f"Auto gallery job failed: {e}")
-        if index < len(urls):
-            sleep_with_jitter()
-    data_buffer.flush()
-
-    if deletion_tracker is not None:
-        print(f"Deletion check stats: {json.dumps(deletion_tracker.get_stats(), ensure_ascii=False)}")
+    # Same path as the interactive mode: one shared buffer and one deletion-check snapshot for
+    # the whole list of URLs of this job.
+    crawl_gallery_urls(urls, client, label="Auto gallery job")
 
 
 def run_uploader_job(job: dict, max_workers: int = 15, client=None):

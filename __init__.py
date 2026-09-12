@@ -4,16 +4,37 @@ import os
 from utils.debug_mode import DEBUG_MODE
 from utils.config import load_runtime_cookies
 from utils.constants import REQUEST_DELAY_MS, REQUEST_DELAY_JITTER, HEADERS
-from utils.batch_crawling import crawl_uploader_galleries
-from utils.crawl import crawl_comments
+from utils.batch_crawling import crawl_uploader_galleries, crawl_gallery_urls
 from utils.auto_mode import run_auto_mode, get_default_auto_config_path
-from utils.result import print_single_gallery_result, print_batch_crawling_report
+from utils.result import print_batch_crawling_report
 
 from etc.comment_merge import merge_comment
 from etc.edit_merge import merge_edit
 from etc.uploader_merge import merge_uploader
 
 from mongoutils import get_mongo_client, check_database
+
+# ----------------- Input helpers -----------------
+def read_gallery_urls():
+    """
+    Read gallery URLs from the terminal, one URL per line. An empty line ends the input.
+
+    Returns the URLs in input order; duplicate lines are reported and skipped.
+    """
+    print("\nInput E-Hentai/ExHentai gallery URL(s), one per line. Finish with an empty line.")
+    urls = []
+    seen = set()
+    while True:
+        line = input("> ").strip()
+        if not line:
+            break
+        if line in seen:
+            print(f"Skipped duplicate URL: {line}")
+            continue
+        seen.add(line)
+        urls.append(line)
+    return urls
+
 
 # ----------------- Main -----------------
 def main(max_workers=15):
@@ -27,7 +48,7 @@ def main(max_workers=15):
 
     while True:
         print("\nMode:")
-        print("1 - Crawl one gallery URL")
+        print("1 - Crawl gallery URL(s), one URL per line (empty line to start)")
         print("2 - Crawl galleries from one uploader/listing URL")
         print("3 - Run JSON merging utility (for merging/summarizing previously saved JSON files)")
         print("4 - Run auto jobs")
@@ -43,13 +64,13 @@ def main(max_workers=15):
             continue
 
         if mode == '1':
-            # Crawl one gallery URL
-            user_input = input("\nInput E-Hentai/ExHentai gallery URL:\n> ").strip()
-            if not user_input:
-                print("Please input a valid URL.")
+            # Crawl one or more gallery URLs, one URL per line
+            gallery_urls = read_gallery_urls()
+            if not gallery_urls:
+                print("No gallery URL was given.")
                 continue
             print()
-            print_single_gallery_result(crawl_comments(mongo_client,user_input))
+            crawl_gallery_urls(gallery_urls, mongo_client)
         elif mode == '2':
             # Batch crawl from uploader/listing URL
             user_input = input("\nInput uploader/listing URL:\n> ").strip()

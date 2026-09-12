@@ -5,6 +5,7 @@ from mongoutils import DataBuffer, get_comment_deletion_tracker
 from .batch_gallery_list import collect_uploader_gallery_urls
 from .urlfetch import *
 from .crawl import crawl_comments
+from .result import print_single_gallery_result
 
 
 # ==================== Crawl orchestration ====================
@@ -111,3 +112,52 @@ def crawl_uploader_galleries(uploader_url: str, page_depth=None, max_workers=15,
     report["deletion_stats"] = deletion_tracker.get_stats() if deletion_tracker is not None else None
 
     return report
+
+
+# ==================== Sequential gallery crawling ====================
+def crawl_gallery_urls(urls, client, label: str = "Gallery"):
+    """
+    Crawl a list of gallery URLs one after another.
+
+    Used by the interactive mode (one URL per line) and by auto-mode gallery jobs. All URLs
+    share a single DataBuffer and a single comment-deletion snapshot that is taken before the
+    first request, i.e. the same batch semantics as crawling an uploader/listing URL. One
+    single-gallery report is printed per URL, and the data is flushed when the list is done.
+
+    Returns the deletion-check statistics (or None when the check is switched off).
+    """
+    if client is None:
+        raise ValueError("A MongoDB client is required for gallery crawling.")
+
+    data_buffer = DataBuffer(client)
+
+    # Deletion detection for the whole list: snapshot the comments we already store for every
+    # gallery before the first request, exactly like an uploader/listing crawl does.
+    deletion_tracker = get_comment_deletion_tracker(client)
+    if deletion_tracker is not None:
+        gallery_ids = []
+        for url in urls:
+            key = extract_gallery_key(url)
+            if key:
+                gallery_ids.append(key[0])
+        snapshotted = deletion_tracker.prefetch(gallery_ids)
+        print(f"Comment deletion check: snapshotted existing comments of {snapshotted} gallery/galleries.")
+
+    total = len(urls)
+    for index, url in enumerate(urls, start=1):
+        print(f"\n{label} [{index}/{total}]: {url}")
+        try:
+            print_single_gallery_result(
+                crawl_comments(client, url, data_buffer=data_buffer, deletion_tracker=deletion_tracker)
+            )
+        except Exception as e:
+            print(f"{label} failed: {e}")
+        if index < total:
+            sleep_with_jitter()
+
+    data_buffer.flush()
+
+    stats = deletion_tracker.get_stats() if deletion_tracker is not None else None
+    if stats is not None:
+        print(f"Deletion check stats: {json.dumps(stats, ensure_ascii=False)}")
+    return stats
