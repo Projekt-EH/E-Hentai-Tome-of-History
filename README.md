@@ -17,6 +17,15 @@ uploader/listing URL crawling.
 
 The maximum number allowed is 20.
 
+## Interactive mode
+
+Mode 1 reads gallery URLs from the terminal, one URL per line; an empty line starts the
+crawling, and duplicate lines are skipped. The whole list is crawled with one data buffer and
+one comment-deletion snapshot taken before the first request (see "Comment deletion
+detection"), and one report is printed per URL.
+Mode 2 crawls every gallery found on an uploader/listing URL, mode 3 merges previously saved
+JSON files and mode 4 runs the jobs of `auto_jobs.json`.
+
 ## Config
 
 The config file looks like this:
@@ -43,6 +52,23 @@ instead of the requested URL, and the comments are stored under the gallery ID o
 version. Each switch is announced with `switched to new version: <gallery ID>` right before
 that version is requested. The chain is followed until a page without the notice is reached, a
 version repeats, or `MAX_GALLERY_VERSION_HOPS` (5) hops were made.
+
+### Gallery update
+
+E-Hentai keeps the comment IDs when a gallery is replaced, so the comments already stored for
+the outdated gallery belong to the newest version. As soon as the newest version has been
+fetched, every comment stored under the gallery ID of the outdated upload is re-pointed at the
+newest version: `gallery_id` becomes the new gallery ID and `source_url` becomes the URL the
+newest version is crawled from (`Gallery update: <n> comment(s) moved from <old> to <new>` is
+printed when something moved). The `cleaned` flag of those comments is left as it is (a comment
+that was already flagged as deleted keeps its flag and stays out of the existence check). The
+move happens before the comment IDs of the newest gallery are collected, so a comment of the
+old gallery that is missing from the newest version's page is flagged as deleted by the same
+crawl.
+
+A switch is only applied when the newest version could actually be fetched: if the request for
+it fails, the comments stay under the old gallery. Rows of the `gallery_uploader` collection are
+not re-pointed, only the comments themselves.
 
 ## Comment deletion detection
 

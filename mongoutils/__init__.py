@@ -243,6 +243,32 @@ class CommentDeletionTracker:
             return dict(self._stats)
 
 
+def move_gallery_comments(mongo_client: pymongo.MongoClient, old_gallery_id: str, new_gallery_id: str, new_source_url: str):
+    """
+    Re-point the stored comments of a superseded gallery at its newest version.
+
+    E-Hentai keeps the comment IDs when a gallery is replaced by a newer upload, so the comments
+    already stored under the gallery ID of the outdated upload belong to the newest version:
+    every document of ``old_gallery_id`` gets ``gallery_id`` = ``new_gallery_id`` and
+    ``source_url`` = ``new_source_url`` (the URL the newest version is crawled from). The
+    ``cleaned`` flag of a document is left untouched.
+
+    Returns the number of documents that were moved (0 when the gallery IDs are equal, are
+    empty, or nothing is stored for the old gallery).
+
+    The deletion check has to snapshot the newest gallery *after* this move, which is what
+    :func:`utils.crawl.crawl_comments` does: the move happens as soon as the newest version has
+    been fetched, before the comment IDs of that gallery are collected.
+    """
+    if not old_gallery_id or not new_gallery_id or old_gallery_id == new_gallery_id:
+        return 0
+    result = mongo_client["ehcomment"]["Comments"].update_many(
+        {"gallery_id": old_gallery_id},
+        {"$set": {"gallery_id": new_gallery_id, "source_url": new_source_url}}
+    )
+    return result.modified_count
+
+
 def get_comment_deletion_tracker(mongo_client: pymongo.MongoClient):
     """
     Create a :class:`CommentDeletionTracker`, or return None when comment deletion

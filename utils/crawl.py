@@ -14,7 +14,7 @@ from .urlfetch import (
     sleep_with_jitter,
 )
 from .constants import MAX_GALLERY_VERSION_HOPS
-from mongoutils import DataBuffer, get_comment_deletion_tracker
+from mongoutils import DataBuffer, get_comment_deletion_tracker, move_gallery_comments
 
 def parse_time(time_str: str) -> str:
     time_str = time_str.strip()
@@ -54,7 +54,7 @@ def convert_to_mongodb_date(iso_timestamp: str):
     except (ValueError, TypeError):
         return None
 
-def resolve_latest_gallery_version(target_url: str, gallery_id: str):
+def resolve_latest_gallery_version(target_url: str, gallery_id: str, on_switch=None):
     """
     Follow the "There are newer versions of this gallery available:" notice until the newest
     version of the gallery is reached.
@@ -65,6 +65,11 @@ def resolve_latest_gallery_version(target_url: str, gallery_id: str):
     "switched to new version: <gallery ID>" right before that version is requested, and the
     chain is followed until a page without such a notice is reached, a version repeats, or
     ``MAX_GALLERY_VERSION_HOPS`` hops were made.
+
+    ``on_switch(from_gallery_id, to_gallery_id, to_url)`` is called for every version that was
+    left behind once its successor has been fetched successfully -- this is where the crawler
+    re-points the stored comments of the outdated gallery. A switch whose target could not be
+    fetched is never reported, so nothing is migrated when the newest version is unreachable.
 
     Returns a dict:
         {
@@ -78,6 +83,7 @@ def resolve_latest_gallery_version(target_url: str, gallery_id: str):
         }
     """
     visited_gallery_ids = {gallery_id}
+    pending_switches = []
     soup = None
 
     for _ in range(max(1, MAX_GALLERY_VERSION_HOPS + 1)):
@@ -97,6 +103,13 @@ def resolve_latest_gallery_version(target_url: str, gallery_id: str):
 
         soup = BeautifulSoup(request_result["html"], 'html.parser')
 
+        # The page of the version we switched to has been fetched, so the galleries we left
+        # behind are now known to be outdated: hand them over to the caller.
+        if pending_switches and on_switch is not None:
+            for switch in pending_switches:
+                on_switch(switch["from_gallery_id"], switch["to_gallery_id"], switch["to_url"])
+        pending_switches = []
+
         newer_links = extract_newer_version_links(soup, target_url)
         newest_link, warning = select_newest_version_link(newer_links)
         if warning:
@@ -112,6 +125,11 @@ def resolve_latest_gallery_version(target_url: str, gallery_id: str):
             )
             break
 
+        pending_switches.append({
+            "from_gallery_id": gallery_id,
+            "to_gallery_id": newest_link["gallery_id"],
+            "to_url": newest_link["url"]
+        })
         target_url = newest_link["url"]
         gallery_id = newest_link["gallery_id"]
         visited_gallery_ids.add(gallery_id)
@@ -139,10 +157,11 @@ def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None,
     Crawl the comments of a single gallery.
 
     The requested gallery is first resolved to its newest version when E-Hentai reports that
-    newer versions exist (see :func:`resolve_latest_gallery_version`), and comments that are
-    already stored in MongoDB for the crawled gallery but are missing from this crawl are
-    flagged as deleted (``cleaned = True``) by a
-    :class:`mongoutils.CommentDeletionTracker`.
+    newer versions exist (see :func:`resolve_latest_gallery_version`). Comments stored under the
+    gallery ID of the outdated upload are then re-pointed at the newest version (gallery_id and
+    source_url, see :func:`mongoutils.move_gallery_comments`), and comments that are already
+    stored in MongoDB for the crawled gallery but are missing from this crawl are flagged as
+    deleted (``cleaned = True``) by a :class:`mongoutils.CommentDeletionTracker`.
 
     For single gallery, data_buffer can be None, and the function will create a temporary DataBuffer to flush data immediately.
     For batch crawling, a shared DataBuffer should be provided to accumulate results and flush later.
@@ -153,7 +172,20 @@ def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None,
     if not target_url:
         return {"success": False, "gallery_id": None, "comments": 0, "error": "invalid_url"}
 
-    resolution = resolve_latest_gallery_version(target_url, gallery_id)
+    def move_superseded_gallery(from_gallery_id, to_gallery_id, to_url):
+        """
+        Gallery update: the requested gallery was replaced by a newer upload, so the comments
+        stored for it belong to that newer version and are re-pointed at it (gallery_id and
+        source_url). Called by resolve_latest_gallery_version once the newer version has been
+        fetched successfully, i.e. before the comment IDs of the newest gallery are collected
+        for the deletion check.
+        """
+        moved = move_gallery_comments(mongo_client, from_gallery_id, to_gallery_id, to_url)
+        if moved:
+            print(f"Gallery update: {moved} comment(s) moved from gallery {from_gallery_id} to {to_gallery_id}")
+
+    on_switch = move_superseded_gallery if mongo_client is not None else None
+    resolution = resolve_latest_gallery_version(target_url, gallery_id, on_switch=on_switch)
     target_url = resolution.get("target_url") or target_url
     gallery_id = resolution.get("gallery_id") or gallery_id
 
