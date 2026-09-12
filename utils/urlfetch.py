@@ -10,7 +10,7 @@ from .config import load_runtime_cookies
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, urljoin
 
 
-from .constants import REQUEST_DELAY_MS, REQUEST_DELAY_JITTER, HEADERS
+from .constants import REQUEST_DELAY_MS, REQUEST_DELAY_JITTER, HEADERS, NEWER_VERSION_DIV_ID
 # ============Session================
 def create_session():
     session = requests.Session()
@@ -176,6 +176,84 @@ def process_uploader_url(url: str):
         parsed_url.query,
         parsed_url.fragment
     ))
+
+# ==================== Gallery version notice ====================
+def extract_newer_version_links(soup, base_url: str):
+    """
+    Parse the "There are newer versions of this gallery available:" notice, which E-Hentai
+    renders inside <div id="gnd"> whenever a gallery has been replaced by a newer upload:
+
+        <div id="gnd">
+            <p style="font-weight:bold">There are newer versions of this gallery available:</p>
+            <a href="https://e-hentai.org/g/4084827/59a22262d0/">[Artist] Title [Chinese]</a>, added 2026-07-29 10:32<br />
+            <a href="https://e-hentai.org/g/4094456/3eb184d721/">[Artist] Title [Chinese]</a>, added 2026-08-03 12:04<br />
+        </div>
+
+    Returns a list of entries in document order (top to bottom), each one a dict:
+        {"url": <clean gallery url>, "gallery_id": <str>, "title": <str>, "added": <str|None>}
+
+    Links that are not gallery links are ignored, and an empty list is returned when the
+    notice is absent.
+    """
+    gnd_div = soup.find('div', id=NEWER_VERSION_DIV_ID)
+    if not gnd_div:
+        return []
+
+    # The "added YYYY-MM-DD HH:MM" stamps sit next to their <a> tag, so collecting them from
+    # the container text keeps both sequences in the same (document) order.
+    added_stamps = re.findall(
+        r'added\s+(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)',
+        gnd_div.get_text(" ", strip=True)
+    )
+
+    links = []
+    for index, anchor in enumerate(gnd_div.find_all('a', href=True)):
+        full_url = urljoin(base_url, anchor.get('href'))
+        if extract_gallery_key(full_url) is None:
+            continue
+        clean_url, gallery_id = process_url(full_url)
+        if not clean_url or not gallery_id:
+            continue
+        links.append({
+            "url": clean_url,
+            "gallery_id": gallery_id,
+            "title": anchor.get_text(" ", strip=True),
+            "added": added_stamps[index] if index < len(added_stamps) else None
+        })
+
+    return links
+
+
+def select_newest_version_link(newer_links: list):
+    """
+    Pick the version that should be crawled out of :func:`extract_newer_version_links`.
+
+    Rule: the bottom-most entry is the newest version, and that is the one we crawl.
+    E-Hentai lists the entries in ascending "added" order, so the bottom-most entry normally
+    carries the latest timestamp as well; when it does not, a warning is returned (and
+    printed by the caller) so that a change in the page layout cannot silently send the
+    crawler back to an older version.
+
+    Returns (link_or_None, warning_or_None).
+    """
+    if not newer_links:
+        return None, None
+
+    newest_link = newer_links[-1]
+    dated_links = [link for link in newer_links if link.get("added")]
+    warning = None
+    if len(dated_links) == len(newer_links):
+        latest_added = max(dated_links, key=lambda link: link["added"])
+        if latest_added["gallery_id"] != newest_link["gallery_id"]:
+            warning = (
+                "Warning: the bottom-most gallery version entry is not the one with the latest "
+                f"\"added\" stamp (bottom: {newest_link['gallery_id']} added {newest_link['added']}, "
+                f"latest: {latest_added['gallery_id']} added {latest_added['added']}). "
+                "Crawling the bottom-most entry as usual."
+            )
+
+    return newest_link, warning
+
 
 # ==================== Gallery page diagnostics ====================
 def classify_missing_cdiv_reason(soup, url: str):

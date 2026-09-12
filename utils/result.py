@@ -6,32 +6,62 @@ def print_single_gallery_result(result: dict):
     comments = result.get("comments") if result else 0
     error = result.get("error") if result else "unknown_error"
     update_results = result.get("db_stats",{})
+    deletion = result.get("deletion") if result else None
     print("\nSingle gallery result:")
     print(f"  status: {status}")
     print(f"  gallery_id: {gallery_id}")
     print(f"  comments: {comments}")
     print(f"  error: {error}")
 
+    print_deletion_report(deletion)
+
     update_results_str = json.dumps(update_results, indent=4, ensure_ascii=False,) if update_results else "{}"
     prefix_space = " " * 2
     update_results_str = "\n".join(prefix_space + line for line in update_results_str.splitlines())
     print(f"  update_results:\n{update_results_str}")
+
+def print_deletion_report(deletion: dict, prefix: str = "  "):
+    """
+    Print the outcome of the comment deletion check of one gallery. A None report means the
+    check did not run (single crawl without a database client or detection switched off).
+    """
+    if not deletion:
+        return
+
+    if deletion.get("status") == "skipped":
+        print(
+            f"{prefix}deletion_check: skipped (no comment snapshot was taken before crawling) "
+            f"| gallery_id: {deletion.get('gallery_id')}"
+        )
+        return
+
+    print(
+        f"{prefix}deletion_check: gallery_id: {deletion.get('gallery_id')} "
+        f"| known_before: {deletion.get('checked', 0)} "
+        f"| crawled_now: {deletion.get('crawled', 0)} "
+        f"| deleted: {deletion.get('deleted', 0)} "
+        f"| flagged: {deletion.get('marked', 0)}"
+    )
 
 def print_batch_crawling_report(report: dict):
     discovered = report.get("discovered", 0)
     succeeded = report.get("succeeded", 0)
     failed = report.get("failed", 0)
     total_comments = report.get("total_comments", 0)
+    total_deleted_comments = report.get("total_deleted_comments", 0)
+    total_marked_deleted = report.get("total_marked_deleted_comments", 0)
     failed_items = report.get("failed_items", [])
     items = report.get("items", [])
     db_stats = report.get("db_stats", {})
+    deletion_stats = report.get("deletion_stats")
 
     print("\nBatch crawling report:")
     print(f"  discovered: {discovered}")
     print(f"  succeeded: {succeeded}")
     print(f"  failed: {failed}")
     print(f"  total_comments: {total_comments}")
-    
+    print(f"  total_deleted_comments: {total_deleted_comments} (flagged as cleaned: {total_marked_deleted})")
+
     if failed_items:
         print("  failed_items:")
         for failed_item in failed_items:
@@ -39,6 +69,15 @@ def print_batch_crawling_report(report: dict):
             reason = failed_item.get("reason")
             url = failed_item.get("url")
             print(f"    {gallery_id} | {reason} | {url}")
+
+    if deletion_stats:
+        try:
+            deletion_stats_str = json.dumps(deletion_stats, indent=4, ensure_ascii=False)
+            prefix_space = " " * 2
+            deletion_stats_str_indent = "\n".join(prefix_space + line for line in deletion_stats_str.splitlines())
+            print(f"  deletion_stats:\n{deletion_stats_str_indent}")
+        except Exception:
+            print(f"  deletion_stats:\n  {deletion_stats}")
 
     try:
         db_stats_str = json.dumps(db_stats, indent=4, ensure_ascii=False)

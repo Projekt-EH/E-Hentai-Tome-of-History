@@ -63,6 +63,204 @@ def check_database(mongo_client: pymongo.MongoClient):
     gallery_uploader_db.create_index([("gallery_id", pymongo.ASCENDING), ("comment_sha256", pymongo.ASCENDING)], unique=True, name="gid_comment_hash")
 
 
+def _not_flagged_filter(**extra):
+    """
+    Build a query filter for comments that are not flagged as deleted yet.
+
+    MongoDB's ``$ne`` also matches documents where the field is missing or null, so comments
+    written before the ``cleaned`` flag existed (older versions of this crawler) are matched
+    as well and take part in the deletion comparison like any other comment.
+    """
+    return {"cleaned": {"$ne": True}, **extra}
+
+
+class CommentDeletionTracker:
+    """
+    Detect comments that are gone from a gallery.
+
+    MongoDB is the reference for "what we already had": the comment IDs of a gallery are
+    snapshotted *before* that gallery is crawled, and every snapshotted ID that is missing
+    from a successful crawl is flagged as deleted (``cleaned = True``). On E-Hentai a comment
+    ID is stable for the lifetime of the comment (the page renders ``<a name="c8506504">`` /
+    ``id="comment_8506504"``), so comparing IDs across crawls is safe and is not affected by
+    other comments being added or removed.
+
+    Comments that are already flagged (``cleaned = True``) are left out of the snapshot
+    entirely: they are already known to be gone, so there is nothing to compare or to flag.
+    Comments stored before the flag existed (no ``cleaned`` field at all, or a null one) are
+    matched by the snapshot query and are compared like any other comment.
+
+    A crawl that failed (request error, missing comment container, gallery removed, ...) must
+    never be reported through :meth:`check` -- "not crawled" is not "deleted". For the same
+    reason :meth:`check` only compares against a snapshot that was taken before the crawl:
+    a gallery without a snapshot is reported as skipped instead of being compared against a
+    database state that may already contain the comments of this very crawl.
+
+    Instances are thread-safe. Batch crawling snapshots every gallery of the list up front
+    with :meth:`prefetch` and then reports per gallery from the worker threads.
+    """
+
+    def __init__(self, mongo_client: pymongo.MongoClient, batch_size: int = 500, mark_deleted: bool = True):
+        self.comments_col = mongo_client["ehcomment"]["Comments"]
+        self.batch_size = batch_size
+        self.mark_deleted = mark_deleted
+        self._snapshots = {}
+        self._lock = threading.Lock()
+        self._stats = {
+            "galleries_snapshotted": 0,
+            "galleries_checked": 0,
+            "galleries_skipped": 0,
+            "comments_checked": 0,
+            "comments_missing": 0,
+            "comments_marked_deleted": 0,
+            "snapshot_queries": 0,
+        }
+
+    def prefetch(self, gallery_ids):
+        """
+        Snapshot the existing comment IDs of many galleries in one pass.
+
+        Used by batch crawling right after the gallery list has been collected, so that
+        every comparison of the run is made against the same database state. Comments that
+        are already flagged as deleted are skipped, and gallery IDs without any remaining
+        comment are remembered as empty snapshots. Returns the number of unique gallery IDs
+        that were snapshotted.
+        """
+        unique_ids = [gallery_id for gallery_id in dict.fromkeys(gallery_ids) if gallery_id]
+        if not unique_ids:
+            return 0
+
+        loaded = {}
+        queries = 0
+        for start in range(0, len(unique_ids), self.batch_size):
+            chunk = unique_ids[start:start + self.batch_size]
+            queries += 1
+            cursor = self.comments_col.find(
+                _not_flagged_filter(gallery_id={"$in": chunk}),
+                {"_id": 1, "gallery_id": 1}
+            )
+            for doc in cursor:
+                loaded.setdefault(doc.get("gallery_id"), set()).add(doc["_id"])
+
+        with self._lock:
+            for gallery_id in unique_ids:
+                # setdefault: a snapshot that already exists (just-in-time query) wins.
+                self._snapshots.setdefault(gallery_id, loaded.get(gallery_id, set()))
+            self._stats["galleries_snapshotted"] += len(unique_ids)
+            self._stats["snapshot_queries"] += queries
+        return len(unique_ids)
+
+    def snapshot_for(self, gallery_id: str):
+        """
+        Return the snapshot of one gallery, either the one taken earlier (``prefetch`` or a
+        previous call) or a fresh query. Comments that are already flagged as deleted are not
+        part of the snapshot. Returns None for an empty gallery ID.
+        """
+        if not gallery_id:
+            return None
+
+        with self._lock:
+            if gallery_id in self._snapshots:
+                return set(self._snapshots[gallery_id])
+
+        comment_ids = {
+            doc["_id"]
+            for doc in self.comments_col.find(
+                _not_flagged_filter(gallery_id=gallery_id),
+                {"_id": 1}
+            )
+        }
+        with self._lock:
+            self._stats["galleries_snapshotted"] += 1
+            self._stats["snapshot_queries"] += 1
+            return set(self._snapshots.setdefault(gallery_id, comment_ids))
+
+    def check(self, gallery_id: str, crawled_ids, mark: bool = None):
+        """
+        Compare the snapshot of one gallery with the comment IDs of a successful crawl and
+        flag the missing ones as deleted.
+
+        Returns a report dict::
+
+            {
+                "gallery_id": str,
+                "status": "checked" | "skipped",
+                "checked": int,   # comments known from MongoDB before the crawl
+                "crawled": int,   # comments returned by this crawl
+                "deleted": int,   # comments present in MongoDB but not crawled
+                "marked": int     # documents flagged with cleaned = True by this check
+            }
+
+        ``status`` is "skipped" when the gallery has no snapshot yet, which means the caller
+        did not snapshot before crawling; nothing is marked in that case.
+        """
+        with self._lock:
+            snapshot = self._snapshots.get(gallery_id)
+            snapshot = set(snapshot) if snapshot is not None else None
+
+        if snapshot is None:
+            with self._lock:
+                self._stats["galleries_skipped"] += 1
+            return {
+                "gallery_id": gallery_id,
+                "status": "skipped",
+                "checked": 0,
+                "crawled": len(set(crawled_ids)),
+                "deleted": 0,
+                "marked": 0,
+            }
+
+        crawled = set(crawled_ids)
+        missing = snapshot - crawled
+        report = {
+            "gallery_id": gallery_id,
+            "status": "checked",
+            "checked": len(snapshot),
+            "crawled": len(crawled),
+            "deleted": len(missing),
+            "marked": 0,
+        }
+
+        should_mark = self.mark_deleted if mark is None else mark
+        if missing and should_mark:
+            result = self.comments_col.update_many(
+                {"_id": {"$in": list(missing)}},
+                {"$set": {"cleaned": True}}
+            )
+            report["marked"] = result.modified_count
+
+        with self._lock:
+            self._stats["galleries_checked"] += 1
+            self._stats["comments_checked"] += report["checked"]
+            self._stats["comments_missing"] += report["deleted"]
+            self._stats["comments_marked_deleted"] += report["marked"]
+
+        return report
+
+    def get_stats(self):
+        """Return a snapshot of the tracking counters."""
+        with self._lock:
+            return dict(self._stats)
+
+
+def get_comment_deletion_tracker(mongo_client: pymongo.MongoClient):
+    """
+    Create a :class:`CommentDeletionTracker`, or return None when comment deletion
+    detection is switched off (``utils.constants.DELETION_DETECTION_ENABLED``) or when no
+    MongoDB client is available.
+    """
+    if mongo_client is None:
+        return None
+    try:
+        # Imported lazily so this storage module does not hard-depend on the crawler config.
+        from utils.constants import DELETION_DETECTION_ENABLED
+    except ImportError:
+        DELETION_DETECTION_ENABLED = True
+    if not DELETION_DETECTION_ENABLED:
+        return None
+    return CommentDeletionTracker(mongo_client)
+
+
 class DataBuffer:
     """
     Thread-safe in-memory buffer for crawler output.

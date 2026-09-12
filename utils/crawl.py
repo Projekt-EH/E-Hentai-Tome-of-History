@@ -4,8 +4,17 @@ import re
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
-from .urlfetch import SESSION, process_url, request_html, diagnose_gallery_page_without_comments
-from mongoutils import DataBuffer
+from .urlfetch import (
+    SESSION,
+    process_url,
+    request_html,
+    diagnose_gallery_page_without_comments,
+    extract_newer_version_links,
+    select_newest_version_link,
+    sleep_with_jitter,
+)
+from .constants import MAX_GALLERY_VERSION_HOPS
+from mongoutils import DataBuffer, get_comment_deletion_tracker
 
 def parse_time(time_str: str) -> str:
     time_str = time_str.strip()
@@ -45,33 +54,123 @@ def convert_to_mongodb_date(iso_timestamp: str):
     except (ValueError, TypeError):
         return None
 
-def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None):
+def resolve_latest_gallery_version(target_url: str, gallery_id: str):
     """
+    Follow the "There are newer versions of this gallery available:" notice until the newest
+    version of the gallery is reached.
+
+    E-Hentai renders that notice inside <div id="gnd"> when the gallery has been replaced by a
+    newer upload; the bottom-most entry of the notice is the newest version and is the one we
+    crawl (see :func:`utils.urlfetch.select_newest_version_link`). Every switch prints
+    "switched to new version: <gallery ID>" right before that version is requested, and the
+    chain is followed until a page without such a notice is reached, a version repeats, or
+    ``MAX_GALLERY_VERSION_HOPS`` hops were made.
+
+    Returns a dict:
+        {
+            "ok": bool,               # True when a gallery page was fetched successfully
+            "error": str | None,      # request error of the last failed request
+            "status_code": int | None,
+            "request_result": dict,   # raw result of the last request
+            "soup": BeautifulSoup | None,
+            "target_url": str,        # URL of the page in "soup"
+            "gallery_id": str         # gallery ID of the page in "soup"
+        }
+    """
+    visited_gallery_ids = {gallery_id}
+    soup = None
+
+    for _ in range(max(1, MAX_GALLERY_VERSION_HOPS + 1)):
+        print(f"Requesting gallery: {target_url}")
+
+        request_result = request_html(target_url, SESSION)
+        if not request_result["ok"]:
+            return {
+                "ok": False,
+                "error": request_result["error"],
+                "status_code": request_result["status_code"],
+                "request_result": request_result,
+                "soup": None,
+                "target_url": target_url,
+                "gallery_id": gallery_id
+            }
+
+        soup = BeautifulSoup(request_result["html"], 'html.parser')
+
+        newer_links = extract_newer_version_links(soup, target_url)
+        newest_link, warning = select_newest_version_link(newer_links)
+        if warning:
+            print(warning)
+
+        if not newest_link:
+            break
+
+        if newest_link["gallery_id"] == gallery_id or newest_link["gallery_id"] in visited_gallery_ids:
+            print(
+                f"Gallery {gallery_id} points to an already fetched version "
+                f"({newest_link['gallery_id']}); keeping the current page."
+            )
+            break
+
+        target_url = newest_link["url"]
+        gallery_id = newest_link["gallery_id"]
+        visited_gallery_ids.add(gallery_id)
+        print(f"switched to new version: {gallery_id}")
+        sleep_with_jitter()
+    else:
+        print(
+            f"Gallery version hop limit ({MAX_GALLERY_VERSION_HOPS}) reached; "
+            f"stopping at gallery {gallery_id}."
+        )
+
+    return {
+        "ok": True,
+        "error": None,
+        "status_code": 200,
+        "request_result": request_result,
+        "soup": soup,
+        "target_url": target_url,
+        "gallery_id": gallery_id
+    }
+
+
+def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None, deletion_tracker=None):
+    """
+    Crawl the comments of a single gallery.
+
+    The requested gallery is first resolved to its newest version when E-Hentai reports that
+    newer versions exist (see :func:`resolve_latest_gallery_version`), and comments that are
+    already stored in MongoDB for the crawled gallery but are missing from this crawl are
+    flagged as deleted (``cleaned = True``) by a
+    :class:`mongoutils.CommentDeletionTracker`.
+
     For single gallery, data_buffer can be None, and the function will create a temporary DataBuffer to flush data immediately.
     For batch crawling, a shared DataBuffer should be provided to accumulate results and flush later.
+    A shared deletion_tracker (batch crawling, pre-filled by CommentDeletionTracker.prefetch) is
+    reused when provided; otherwise a tracker is created for this gallery alone.
     """
     target_url, gallery_id = process_url(input_url)
     if not target_url:
         return {"success": False, "gallery_id": None, "comments": 0, "error": "invalid_url"}
-    
-    print(f"Requesting gallery: {target_url}")
-    
-    request_result = request_html(target_url,SESSION)
-    if not request_result["ok"]:
+
+    resolution = resolve_latest_gallery_version(target_url, gallery_id)
+    target_url = resolution.get("target_url") or target_url
+    gallery_id = resolution.get("gallery_id") or gallery_id
+
+    if not resolution["ok"]:
         return {
             "success": False,
             "gallery_id": gallery_id,
             "comments": 0,
-            "error": request_result["error"],
-            "status_code": request_result["status_code"]
+            "error": resolution["error"],
+            "status_code": resolution["status_code"]
         }
 
-    html_content = request_result["html"]
-
-    soup = BeautifulSoup(html_content, 'html.parser')
+    soup = resolution["soup"]
+    request_result = resolution["request_result"]
     comments_list = []
     edits_list = []
-    
+
     cdiv = soup.find('div', id='cdiv')
 
     if not cdiv:
@@ -80,8 +179,22 @@ def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None)
             target_url,
             request_result=request_result
         )
-        return {"success": False, "gallery_id": gallery_id, "comments": 0, "error": reason}
-        
+        return {
+            "success": False,
+            "gallery_id": gallery_id,
+            "comments": 0,
+            "error": reason
+        }
+
+    # The comment IDs we already store for this gallery must be collected before the comments
+    # crawled below reach MongoDB (the DataBuffer may flush while we are still parsing), so the
+    # deletion check compares against the state from before this crawl.
+    tracker = deletion_tracker
+    if tracker is None:
+        tracker = get_comment_deletion_tracker(mongo_client)
+    if tracker is not None:
+        tracker.snapshot_for(gallery_id)
+
     uploader_comment = ""
     anchors = cdiv.find_all('a', attrs={'name': re.compile(r'^c\d+$')})
     
@@ -191,6 +304,12 @@ def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None)
 
         # _id MUST be comment_id for proper indexing and upsert operations in MongoDB
         # Taking gallery updates into consideration, we should not use a composite key of gallery_id + comment_id, as comment_id will change in an update.
+
+        # Comment existence is not decided here: after the whole page has been parsed, the
+        # comment IDs that MongoDB knows for this gallery are compared with the IDs collected
+        # below, and the ones that are missing are flagged as deleted (see the
+        # CommentDeletionTracker call at the end of this function). Comments written here are
+        # therefore always stored with cleaned = False.
         comment_data = {
             "_id": comment_id,
             "gallery_id": gallery_id,
@@ -201,7 +320,8 @@ def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None)
             "power": power,
             "vote_list": vote_list,
             "is_edited": is_edited,
-            "fetch_time": convert_to_mongodb_date(utc_now_str)
+            "fetch_time": convert_to_mongodb_date(utc_now_str),
+            "cleaned": False # check if the comment is gone
         }
         
         if extracted_user_id:
@@ -238,11 +358,24 @@ def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None)
             if id_match:
                 uploader_data["uploader_id"] = id_match.group(1)
 
+    # Comment deletion check: everything MongoDB stores for this gallery that was not seen in
+    # this successful crawl is gone from the gallery page, so it is flagged as deleted. The
+    # comparison is made by comment ID (the stable E-Hentai comment ID used as the document _id).
+    deletion_report = None
+    if tracker is not None:
+        deletion_report = tracker.check(gallery_id, [comment["_id"] for comment in comments_list])
+        if deletion_report.get("deleted"):
+            print(
+                f"Deleted comments in gallery {gallery_id}: {deletion_report['deleted']} "
+                f"({deletion_report['marked']} flagged as cleaned)."
+            )
+
     result = {
         "success": True,
         "gallery_id": gallery_id,
         "comments": len(comments_list),
-        "error": None
+        "error": None,
+        "deletion": deletion_report
     }
 
     if comments_list or edits_list or uploader_data:
