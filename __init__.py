@@ -1,3 +1,21 @@
+# E-Hentai Tome of History - a gallery comment fetcher and preserver for E-Hentai
+# Copyright (C) 2026  Projekt-EH & AXIS5(AXIS5hacker)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import argparse
 import os
 
@@ -38,13 +56,8 @@ def read_gallery_urls():
 
 # ----------------- Main -----------------
 def main(max_workers=15):
-    print("=" * 50)
-    print("E-Hentai comment crawler - interactive mode")
-    print("=" * 50)
+    
     print(f"Parallel crawl workers: {max_workers}")
-
-    mongo_client = get_mongo_client()
-    check_database(mongo_client)
 
     while True:
         print("\nMode:")
@@ -52,6 +65,7 @@ def main(max_workers=15):
         print("2 - Crawl galleries from one uploader/listing URL")
         print("3 - Run JSON merging utility (for merging/summarizing previously saved JSON files)")
         print("4 - Run auto jobs")
+        print("5 - About")
         print("Input 'exit' or 'quit' to exit")
         mode = input("> ").strip().lower()
 
@@ -59,8 +73,8 @@ def main(max_workers=15):
             print("Program exited.")
             break
 
-        if mode not in ['1', '2', '3', '4']:
-            print("Invalid input. Please enter 1, 2, 3, 4, exit, or quit.")
+        if mode not in ['1', '2', '3', '4','5']:
+            print("Invalid input. Please enter 1, 2, 3, 4, 5 ,exit, or quit.")
             continue
 
         if mode == '1':
@@ -95,14 +109,35 @@ def main(max_workers=15):
             merge_comment(os.path.join(os.path.dirname(__file__), 'comments'))
             merge_edit(os.path.join(os.path.dirname(__file__), 'comment_edits'))
             merge_uploader(os.path.join(os.path.dirname(__file__), 'gallery_uploaders'))
-        else:
+        elif mode == '4':
             # Auto mode
             config_path = input("\nInput auto jobs JSON path (empty=auto_jobs.json):\n> ").strip()
             run_auto_mode(config_path or get_default_auto_config_path(), client=mongo_client, max_workers=max_workers)
+        else:
+            # About
+            print("""
+E-Hentai Tome of History - a gallery comment fetcher and preserver for E-Hentai
+Copyright (C) 2026  Projekt-EH & AXIS5(AXIS5hacker)
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.""")
         print()
 
 
 if __name__ == "__main__":
+
+    print("=" * 50)
+    print("""
+    E-Hentai Tome of History - a gallery comment fetcher and preserver for E-Hentai
+    Copyright (C) 2026  Projekt-EH & AXIS5(AXIS5hacker)
+    """)
+    print("=" * 50)
+
     parser = argparse.ArgumentParser(description="E-Hentai comment crawler")
     parser.add_argument("-p", "--parallel", type=int, default=15,
                         help="Max parallel workers for uploader/listing crawling (1-20, default: 15)")
@@ -117,4 +152,5 @@ if __name__ == "__main__":
     if args.auto is not None:
         exit(run_auto_mode(args.auto, client=mongo_client, max_workers=max_workers))
 
+    print(f"Interactive mode started.")
     main(max_workers=max_workers)
