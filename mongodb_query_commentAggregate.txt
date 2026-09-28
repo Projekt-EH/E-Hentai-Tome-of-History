@@ -1,0 +1,55 @@
+db.getCollection("Comments").aggregate([
+  // Stage 1: Only edited comments
+  { $match: { "is_edited": true } },
+
+  // Stage 2: Join with comment_edits
+  {
+    $lookup: {
+      from: "comment_edits",
+      localField: "_id",
+      foreignField: "comment_id",
+      pipeline: [
+        {
+          $group: {
+            _id: "$comment_id",
+            edits: {
+              $push: {
+                "edit_time": "$edit_time",
+                "edit_content": "$edit_content"
+              }
+            }
+          }
+        }
+      ],
+      as: "edit"
+    }
+  },
+
+  // Stage 3: Unwind edit array
+  { $unwind: "$edit" },
+
+  // Stage 4: Shape the output
+  {
+    $project: {
+      id: 1,
+      "gallery_id": 1,
+      username: 1,
+      "post_time": 1,
+      content: 1,
+      edit: "$edit.edits",
+      "vote_list": 1,
+      "current_score": 1,
+      power: 1
+    }
+  },
+
+  // Stage 5: Filter — content is not null, OR edit array has >1 element
+  {
+    $match: {
+      $or: [
+        { content: { $ne: null } },
+        { $expr: { $gt: [{ $size: "$edit" }, 1] } }
+      ]
+    }
+  }
+])

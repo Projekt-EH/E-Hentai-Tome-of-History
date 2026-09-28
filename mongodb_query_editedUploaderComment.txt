@@ -1,0 +1,25 @@
+db.getCollection("gallery_uploader").aggregate([
+    {
+        $group: {
+            _id: {
+                gallery_id: "$gallery_id",
+                url: "$source_url"
+            },
+            edits: {
+                $push: {
+                    "uploader_comment": "$uploader_comment"
+                }
+            }
+        }
+    },
+    {
+        $match: 
+        {
+            $expr: {
+                $gt: [{
+                    $size: "$edits"
+                }, 1]
+            }
+        }
+    }
+])
