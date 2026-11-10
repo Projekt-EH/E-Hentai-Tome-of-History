@@ -132,15 +132,17 @@ def crawl_uploader_galleries(uploader_url: str, page_depth=None, max_workers=15,
     return report
 
 
-# ==================== Sequential gallery crawling ====================
-def crawl_gallery_urls(urls, client, label: str = "Gallery"):
+# ==================== Gallery-list crawling ====================
+def crawl_gallery_urls(urls, client, label: str = "Gallery", max_workers: int = 1):
     """
-    Crawl a list of gallery URLs one after another.
+    Crawl a list of gallery URLs.
 
-    Used by the interactive mode (one URL per line) and by auto-mode gallery jobs. All URLs
-    share a single DataBuffer and a single comment-deletion snapshot that is taken before the
-    first request, i.e. the same batch semantics as crawling an uploader/listing URL. One
-    single-gallery report is printed per URL, and the data is flushed when the list is done.
+    Used by the interactive mode (one URL per line), by auto-mode gallery jobs, and by the
+    mode-5 re-crawl. All URLs share a single DataBuffer and a single comment-deletion
+    snapshot that is taken before the first request, i.e. the same batch semantics as
+    crawling an uploader/listing URL. With ``max_workers`` > 1 the galleries are requested
+    concurrently; one single-gallery report is printed per URL, and the data is flushed when
+    the list is done.
 
     Returns the deletion-check statistics (or None when the check is switched off).
     """
@@ -162,16 +164,34 @@ def crawl_gallery_urls(urls, client, label: str = "Gallery"):
         print(f"Comment deletion check: snapshotted existing comments of {snapshotted} gallery/galleries.")
 
     total = len(urls)
-    for index, url in enumerate(urls, start=1):
-        print(f"\n{label} [{index}/{total}]: {url}")
+    workers = max(1, min(int(max_workers or 1), total)) if total else 1
+
+    def crawl_one(index, url):
         try:
-            print_single_gallery_result(
-                crawl_comments(client, url, data_buffer=data_buffer, deletion_tracker=deletion_tracker)
+            result = crawl_comments(
+                client, url, data_buffer=data_buffer, deletion_tracker=deletion_tracker
             )
         except Exception as e:
-            print(f"{label} failed: {e}")
-        if index < total:
-            sleep_with_jitter()
+            result = {"success": False, "gallery_id": None, "comments": 0, "error": str(e)}
+        sleep_with_jitter()
+        return index, url, result
+
+    if workers == 1:
+        for index, url in enumerate(urls, start=1):
+            print(f"\n{label} [{index}/{total}]: {url}")
+            _, _, result = crawl_one(index, url)
+            print_single_gallery_result(result)
+    else:
+        print(f"Crawling {total} gallery/galleries with {workers} parallel workers.")
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(crawl_one, index, url)
+                for index, url in enumerate(urls, start=1)
+            ]
+            for future in as_completed(futures):
+                index, url, result = future.result()
+                print(f"\n{label} [{index}/{total}]: {url}")
+                print_single_gallery_result(result)
 
     data_buffer.flush()
 

@@ -183,6 +183,39 @@ detection"), and one report is printed per URL.
 Mode 2 crawls every gallery found on an uploader/listing URL, mode 3 merges previously saved
 JSON files and mode 4 runs the jobs of `auto_jobs.json`.
 
+Mode 5 downvotes gallery comments (see "Downvoting comments" below). Mode 6 prints the license
+text.
+
+## Downvoting comments
+
+Mode 5 asks for gallery URL(s) first (an empty list resolves every comment through the local
+archive), then for comment IDs or permalinks separated by commas, spaces or newlines.
+Duplicates are skipped and unrecognized tokens ignored. Each gallery page is loaded once, even
+when it is listed twice or under another spelling (with/without `?hc=1`); IDs not found on the
+given pages are resolved through the archive, and IDs found nowhere are skipped. Comments
+flagged `cleaned = True` in the archive (perma-hidden or gone) are skipped before any page is
+requested. The page supplies `api_url` / `apiuid` / `apikey` / `gid` / `token`, so the cookie
+session from `config.json` must be logged in.
+
+Every comment is downvoted with `votecomment` (`comment_vote = -1`), with a 1 second gap
+between the requests actually sent. Comments that are already downvoted, not found, or
+otherwise skipped cost no wait. An expired session stops the batch; other errors are reported
+and the batch continues.
+
+`-1` is a toggle: re-sending it for a comment the user already downvoted withdraws that vote.
+The page marks cast downvotes with a non-empty `style` on `comment_vote_down_<ID>`, so those are
+skipped ("already downvoted"). Comments the page no longer renders cannot be checked; if the API
+answers `comment_vote = 0`, the tool re-applies the vote once (the server state is then 0 and
+cannot toggle again) and reports a second failure as failed.
+
+A gallery where the user has posted a comment rejects all comment votes and renders no
+Vote+/Vote- links. Such a page is detected before any request and the whole gallery is skipped;
+the same gallery-wide skip is applied if the API returns "Cannot vote when own comment exists
+in gallery".
+
+Every gallery with an accepted vote is re-crawled in parallel (`-p`, default 15) so the archive
+reflects the new scores. The final line reports downvoted, already downvoted, failed and skipped.
+
 ## Config
 
 The config file looks like this:

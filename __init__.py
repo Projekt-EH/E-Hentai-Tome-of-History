@@ -25,6 +25,10 @@ from utils.constants import REQUEST_DELAY_MS, REQUEST_DELAY_JITTER, HEADERS
 from utils.batch_crawling import crawl_uploader_galleries, crawl_gallery_urls
 from utils.auto_mode import run_auto_mode, get_default_auto_config_path
 from utils.result import print_batch_crawling_report
+from utils.comment_vote import (
+    downvote_comments_in_galleries,
+    normalize_comment_ids,
+)
 
 from etc.comment_merge import merge_comment
 from etc.edit_merge import merge_edit
@@ -33,13 +37,13 @@ from etc.uploader_merge import merge_uploader
 from mongoutils import get_mongo_client, check_database
 
 # ----------------- Input helpers -----------------
-def read_gallery_urls():
+def read_gallery_urls(header=None):
     """
     Read gallery URLs from the terminal, one URL per line. An empty line ends the input.
 
     Returns the URLs in input order; duplicate lines are reported and skipped.
     """
-    print("\nInput E-Hentai/ExHentai gallery URL(s), one per line. Finish with an empty line.")
+    print(header or "\nInput E-Hentai/ExHentai gallery URL(s), one per line. Finish with an empty line.")
     urls = []
     seen = set()
     while True:
@@ -54,6 +58,25 @@ def read_gallery_urls():
     return urls
 
 
+def read_comment_ids():
+    """
+    Read comment IDs (or comment permalinks) from the terminal. Tokens may be separated by
+    commas, spaces or newlines: a line can hold several IDs, and every line adds more
+    tokens. An empty line ends the input.
+
+    Returns the raw tokens in input order.
+    """
+    print("\nStage 2/2 - Input comment ID(s) or comment permalink(s).")
+    print("Separate them with commas, spaces or newlines. Finish with an empty line.")
+    values = []
+    while True:
+        line = input("> ").strip()
+        if not line:
+            break
+        values.extend(line.replace(",", " ").split())
+    return values
+
+
 # ----------------- Main -----------------
 def main(max_workers=15):
     
@@ -65,7 +88,8 @@ def main(max_workers=15):
         print("2 - Crawl galleries from one uploader/listing URL")
         print("3 - Run JSON merging utility (for merging/summarizing previously saved JSON files)")
         print("4 - Run auto jobs")
-        print("5 - About")
+        print("5 - Downvote gallery comment(s)")
+        print("6 - About")
         print("Input 'exit' or 'quit' to exit")
         mode = input("> ").strip().lower()
 
@@ -73,8 +97,8 @@ def main(max_workers=15):
             print("Program exited.")
             break
 
-        if mode not in ['1', '2', '3', '4','5']:
-            print("Invalid input. Please enter 1, 2, 3, 4, 5 ,exit, or quit.")
+        if mode not in ['1', '2', '3', '4', '5', '6']:
+            print("Invalid input. Please enter 1, 2, 3, 4, 5, 6, exit, or quit.")
             continue
 
         if mode == '1':
@@ -113,6 +137,43 @@ def main(max_workers=15):
             # Auto mode
             config_path = input("\nInput auto jobs JSON path (empty=auto_jobs.json):\n> ").strip()
             run_auto_mode(config_path or get_default_auto_config_path(), client=mongo_client, max_workers=max_workers)
+        elif mode == '5':
+            # Stage 1: galleries (optional). Stage 2: comment IDs. Then re-crawl affected.
+            gallery_urls = read_gallery_urls(
+                "\nStage 1/2 - Input gallery URL(s) the comments belong to, one per line.\n"
+                "Press Enter immediately to resolve every comment from the local archive.\n"
+                "Finish with an empty line."
+            )
+            comment_values = read_comment_ids()
+            if not comment_values:
+                print("No comment ID was given.")
+                continue
+            comment_ids, invalid_values = normalize_comment_ids(comment_values)
+            for value in invalid_values:
+                print(f"Ignored unrecognized comment ID: {value}")
+            if not comment_ids:
+                print("No valid comment ID was given.")
+                continue
+
+            summary = downvote_comments_in_galleries(
+                gallery_urls,
+                comment_ids,
+                mongo_client=mongo_client,
+            )
+            affected = summary.get("affected_galleries") or []
+            if not affected:
+                print("\nNo gallery was affected; nothing to re-crawl.")
+                continue
+            if mongo_client is None:
+                print("\nMongoDB client unavailable; skipping the re-crawl.")
+                continue
+            print(f"\nRe-crawling {len(affected)} affected gallery/galleries...")
+            crawl_gallery_urls(
+                affected,
+                mongo_client,
+                label="Re-crawl",
+                max_workers=max_workers,
+            )
         else:
             # About
             print("""
