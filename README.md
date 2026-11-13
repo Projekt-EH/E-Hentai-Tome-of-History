@@ -197,7 +197,7 @@ flagged `cleaned = True` in the archive (perma-hidden or gone) are skipped befor
 requested. The page supplies `api_url` / `apiuid` / `apikey` / `gid` / `token`, so the cookie
 session from `config.json` must be logged in.
 
-Every comment is downvoted with `votecomment` (`comment_vote = -1`), with a 1 second gap
+Every comment is downvoted with `votecomment` (`comment_vote = -1`), with a random 1.2–1.8 second gap
 between the requests actually sent. Comments that are already downvoted, not found, or
 otherwise skipped cost no wait. An expired session stops the batch; other errors are reported
 and the batch continues.

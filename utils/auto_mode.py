@@ -234,7 +234,11 @@ def run_auto_mode(config_path: str, max_workers: int = 15, client=None):
             run_auto_jobs(config.get("jobs", []), max_workers=max_workers, client=client)
 
             sleep_seconds = get_interval_sleep_seconds(config)
+            finished_at = datetime.now()
+            next_round_at = finished_at + timedelta(seconds=sleep_seconds)
+            print(f"Finished this round at {finished_at:%Y-%m-%d %H:%M:%S}.")
             print(f"Auto mode sleeping {sleep_seconds / 60:.2f} minutes before next round.")
+            print(f"next round will be launched at about {next_round_at:%Y-%m-%d %H:%M:%S}.")
             if not sleep_until_or_stop(sleep_seconds, end_at):
                 print("Auto mode reached end_at. Exiting.")
                 return 0

@@ -32,6 +32,7 @@ sends the same request through the crawler's cookie session, one comment at a ti
 ``VOTE_INTERVAL_SECONDS`` between the comments of a list.
 """
 
+import random
 import re
 import time
 
@@ -49,10 +50,9 @@ COMMENT_VOTE_DOWN = -1
 # that gallery would fail the same way, so the gallery is skipped after the first rejection.
 _GALLERY_BLOCKED_ERROR = "own comment exists in gallery"
 
-# Spacing between the API calls of a batch.  The site's own vote_comment() serialises the
-# votes through the global comment_xhr; one full second between comments also stays clear
-# of the server-side rate limit.
-VOTE_INTERVAL_SECONDS = 1.0
+# Client-side pacing, not a documented server rate limit: sample a fresh delay per request.
+VOTE_INTERVAL_SECONDS = 1.5
+VOTE_INTERVAL_JITTER_SECONDS = 0.3
 
 # The gallery page script defines the credentials the page's JavaScript uses, e.g.
 #     var api_url = "https://e-hentai.org/api.php";
@@ -431,10 +431,14 @@ def _vote_plan(plan, interval, session, sleep, initial_skipped=None, contexts=No
     blocked_galleries = set()
 
     def send_vote(context, comment_id):
-        """Send one vote, keeping ``interval`` between consecutive API requests."""
+        """Space actual requests by ``interval`` ± 0.3 seconds, clamped at zero."""
         nonlocal last_request_at
         if last_request_at is not None:
-            remaining = interval - (time.monotonic() - last_request_at)
+            delay = random.uniform(
+                max(0.0, interval - VOTE_INTERVAL_JITTER_SECONDS),
+                max(0.0, interval + VOTE_INTERVAL_JITTER_SECONDS),
+            ) if interval > 0 else 0.0
+            remaining = delay - (time.monotonic() - last_request_at)
             if remaining > 0:
                 sleep(remaining)
         data = vote_comment(context, comment_id, COMMENT_VOTE_DOWN, session)
@@ -562,7 +566,7 @@ def downvote_comments(
     """
     Downvote the given comment(s) of one gallery, one request per comment.
 
-    ``interval`` seconds are slept between consecutive API calls.  The gallery page is
+    Requests are spaced by ``interval`` ± 0.3 seconds (zero disables waiting). The gallery is
     requested once; its ``apiuid`` / ``apikey`` / ``gid`` / ``token`` are reused for all
     votes.  Comments the page already shows as downvoted are left untouched instead of being
     voted again (a repeated downvote would withdraw the existing one).  A failed comment is
@@ -640,7 +644,7 @@ def downvote_comments_in_galleries(
     gone) are skipped before any page is requested when ``mongo_client`` is given.  IDs that
     are not found on any provided page are looked up through the local comment archive
     (``Comments._id`` -> ``Comments.source_url``) when ``mongo_client`` is given, and skipped
-    otherwise.  Votes follow the input order with ``interval`` seconds between requests.
+    otherwise. Votes follow input order, spaced by ``interval`` ± 0.3 seconds.
 
     The summary's ``affected_galleries`` lists the pages where at least one vote was
     accepted; this is the set a caller should re-crawl after voting.
