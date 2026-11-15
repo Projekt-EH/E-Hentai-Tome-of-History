@@ -21,10 +21,12 @@ import json
 import time
 import random
 from datetime import datetime, timedelta
+from collections import deque
 
-from .urlfetch import sleep_with_jitter
+from .urlfetch import sleep_with_jitter, extract_gallery_key
 from .batch_crawling import crawl_uploader_galleries, crawl_gallery_urls
 from .result import print_batch_crawling_report
+from .worker_monitor import release_unused_memory, report_memory
 
 
 def get_default_auto_config_path():
@@ -135,17 +137,42 @@ def normalize_gallery_urls(job: dict):
     return urls
 
 
-def run_gallery_job(job: dict, client=None):
+class GalleryTaskWindow:
+    """Keep only gallery keys scheduled for crawling by the latest four jobs."""
+
+    def __init__(self):
+        self.tasks = deque(maxlen=4)
+
+    def start_task(self):
+        self.tasks.append(set())
+
+    def filter_urls(self, urls):
+        current = self.tasks[-1]
+        recent = set().union(*self.tasks)
+        selected = []
+        for url in urls:
+            key = extract_gallery_key(url)
+            if key is None:
+                selected.append(url)
+            elif key not in recent:
+                current.add(key)
+                recent.add(key)
+                selected.append(url)
+        print(f"Auto gallery window: skipped {len(urls) - len(selected)} recent/duplicate gallery URL(s).")
+        return selected
+
+
+def run_gallery_job(job: dict, client=None, gallery_filter=None):
     urls = normalize_gallery_urls(job)
     if client is None:
         raise ValueError("A MongoDB client is required for gallery jobs.")
 
     # Same path as the interactive mode: one shared buffer and one deletion-check snapshot for
     # the whole list of URLs of this job.
-    crawl_gallery_urls(urls, client, label="Auto gallery job")
+    crawl_gallery_urls(urls, client, label="Auto gallery job", gallery_filter=gallery_filter)
 
 
-def run_uploader_job(job: dict, max_workers: int = 15, client=None):
+def run_uploader_job(job: dict, max_workers: int = 15, client=None, gallery_filter=None):
     url = job.get("url")
     if not isinstance(url, str) or not url.strip():
         print("Uploader job requires url.")
@@ -166,25 +193,35 @@ def run_uploader_job(job: dict, max_workers: int = 15, client=None):
             print(f"Invalid uploader job page_depth: {page_depth_raw}")
             return
 
-    report = crawl_uploader_galleries(url.strip(), page_depth, max_workers=max_workers, client=client)
+    report = crawl_uploader_galleries(
+        url.strip(), page_depth, max_workers=max_workers, client=client, gallery_filter=gallery_filter
+    )
     if report:
         print_batch_crawling_report(report)
 
 
-def run_auto_jobs(jobs, max_workers: int = 15, client=None):
+def run_auto_jobs(jobs, max_workers: int = 15, client=None, gallery_window=None):
+    if gallery_window is None:
+        gallery_window = GalleryTaskWindow()
     enabled_jobs = [job for job in jobs if isinstance(job, dict) and job.get("enabled", True)]
     for index, job in enumerate(enabled_jobs, start=1):
         job_type = job.get("type")
+        gallery_window.start_task()
         print(f"\nAuto job [{index}/{len(enabled_jobs)}]: {job_type or 'unknown'}")
         try:
             if job_type == "gallery":
-                run_gallery_job(job, client=client)
+                run_gallery_job(job, client=client, gallery_filter=gallery_window.filter_urls)
             elif job_type == "uploader":
-                run_uploader_job(job, max_workers=max_workers, client=client)
+                run_uploader_job(job, max_workers=max_workers, client=client, gallery_filter=gallery_window.filter_urls)
             else:
                 print(f"Unsupported auto job type: {job_type}")
         except Exception as e:
             print(f"Auto job failed: {e}")
+        finally:
+            # Only the bounded gallery-key window survives; pages and job-local data do not.
+            # Keep SESSION and its authentication cookies alive for the next job.
+            release_unused_memory()
+            report_memory()
         if index < len(enabled_jobs):
             sleep_with_jitter()
 
@@ -231,7 +268,9 @@ def run_auto_mode(config_path: str, max_workers: int = 15, client=None):
                 continue
 
             print(f"\nAuto mode round started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            run_auto_jobs(config.get("jobs", []), max_workers=max_workers, client=client)
+            run_auto_jobs(
+                config.get("jobs", []), max_workers=max_workers, client=client
+            )
 
             sleep_seconds = get_interval_sleep_seconds(config)
             finished_at = datetime.now()

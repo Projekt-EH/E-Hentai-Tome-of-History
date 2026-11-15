@@ -25,6 +25,7 @@ from utils.constants import REQUEST_DELAY_MS, REQUEST_DELAY_JITTER, HEADERS
 from utils.batch_crawling import crawl_uploader_galleries, crawl_gallery_urls
 from utils.auto_mode import run_auto_mode, get_default_auto_config_path
 from utils.result import print_batch_crawling_report
+from utils.worker_monitor import release_unused_memory, report_memory
 from utils.comment_vote import (
     downvote_comments_in_galleries,
     normalize_comment_ids,
@@ -101,82 +102,91 @@ def main(max_workers=15):
             print("Invalid input. Please enter 1, 2, 3, 4, 5, 6, exit, or quit.")
             continue
 
-        if mode == '1':
-            # Crawl one or more gallery URLs, one URL per line
-            gallery_urls = read_gallery_urls()
-            if not gallery_urls:
-                print("No gallery URL was given.")
-                continue
-            print()
-            crawl_gallery_urls(gallery_urls, mongo_client)
-        elif mode == '2':
-            # Batch crawl from uploader/listing URL
-            user_input = input("\nInput uploader/listing URL:\n> ").strip()
-            if not user_input:
-                print("Please input a valid URL.")
-                continue
-            page_depth_input = input("\nInput page depth (empty=auto, 0=first page only, N=click next N times):\n> ").strip()
-            if page_depth_input == "":
-                page_depth = None
-            else:
-                try:
-                    page_depth = int(page_depth_input)
-                    if page_depth < 0:
-                        raise ValueError("page depth must be >= 0")
-                except ValueError as e:
-                    print(f"Invalid page depth: {e}")
-                    continue
-            print_batch_crawling_report(crawl_uploader_galleries(user_input, page_depth, client=mongo_client,max_workers=max_workers))
-        elif mode == '3':
-            # JSON merging utility
-            print("Starting JSON merging utility...")
-            merge_comment(os.path.join(os.path.dirname(__file__), 'comments'))
-            merge_edit(os.path.join(os.path.dirname(__file__), 'comment_edits'))
-            merge_uploader(os.path.join(os.path.dirname(__file__), 'gallery_uploaders'))
-        elif mode == '4':
-            # Auto mode
-            config_path = input("\nInput auto jobs JSON path (empty=auto_jobs.json):\n> ").strip()
-            run_auto_mode(config_path or get_default_auto_config_path(), client=mongo_client, max_workers=max_workers)
-        elif mode == '5':
-            # Stage 1: galleries (optional). Stage 2: comment IDs. Then re-crawl affected.
-            gallery_urls = read_gallery_urls(
-                "\nStage 1/2 - Input gallery URL(s) the comments belong to, one per line.\n"
-                "Press Enter immediately to resolve every comment from the local archive.\n"
-                "Finish with an empty line."
-            )
-            comment_values = read_comment_ids()
-            if not comment_values:
-                print("No comment ID was given.")
-                continue
-            comment_ids, invalid_values = normalize_comment_ids(comment_values)
-            for value in invalid_values:
-                print(f"Ignored unrecognized comment ID: {value}")
-            if not comment_ids:
-                print("No valid comment ID was given.")
-                continue
+        try:
+            run_interactive_mode(mode, max_workers, mongo_client)
+        finally:
+            release_unused_memory()
+            if mode != '6':
+                report_memory()
 
-            summary = downvote_comments_in_galleries(
-                gallery_urls,
-                comment_ids,
-                mongo_client=mongo_client,
-            )
-            affected = summary.get("affected_galleries") or []
-            if not affected:
-                print("\nNo gallery was affected; nothing to re-crawl.")
-                continue
-            if mongo_client is None:
-                print("\nMongoDB client unavailable; skipping the re-crawl.")
-                continue
-            print(f"\nRe-crawling {len(affected)} affected gallery/galleries...")
-            crawl_gallery_urls(
-                affected,
-                mongo_client,
-                label="Re-crawl",
-                max_workers=max_workers,
-            )
+
+def run_interactive_mode(mode, max_workers, mongo_client):
+    if mode == '1':
+        # Crawl one or more gallery URLs, one URL per line
+        gallery_urls = read_gallery_urls()
+        if not gallery_urls:
+            print("No gallery URL was given.")
+            return
+        print()
+        crawl_gallery_urls(gallery_urls, mongo_client)
+    elif mode == '2':
+        # Batch crawl from uploader/listing URL
+        user_input = input("\nInput uploader/listing URL:\n> ").strip()
+        if not user_input:
+            print("Please input a valid URL.")
+            return
+        page_depth_input = input("\nInput page depth (empty=auto, 0=first page only, N=click next N times):\n> ").strip()
+        if page_depth_input == "":
+            page_depth = None
         else:
-            # About
-            print("""
+            try:
+                page_depth = int(page_depth_input)
+                if page_depth < 0:
+                    raise ValueError("page depth must be >= 0")
+            except ValueError as e:
+                print(f"Invalid page depth: {e}")
+                return
+        print_batch_crawling_report(crawl_uploader_galleries(user_input, page_depth, client=mongo_client,max_workers=max_workers))
+    elif mode == '3':
+        # JSON merging utility
+        print("Starting JSON merging utility...")
+        merge_comment(os.path.join(os.path.dirname(__file__), 'comments'))
+        merge_edit(os.path.join(os.path.dirname(__file__), 'comment_edits'))
+        merge_uploader(os.path.join(os.path.dirname(__file__), 'gallery_uploaders'))
+    elif mode == '4':
+        # Auto mode
+        config_path = input("\nInput auto jobs JSON path (empty=auto_jobs.json):\n> ").strip()
+        run_auto_mode(config_path or get_default_auto_config_path(), client=mongo_client, max_workers=max_workers)
+    elif mode == '5':
+        # Stage 1: galleries (optional). Stage 2: comment IDs. Then re-crawl affected.
+        gallery_urls = read_gallery_urls(
+            "\nStage 1/2 - Input gallery URL(s) the comments belong to, one per line.\n"
+            "Press Enter immediately to resolve every comment from the local archive.\n"
+            "Finish with an empty line."
+        )
+        comment_values = read_comment_ids()
+        if not comment_values:
+            print("No comment ID was given.")
+            return
+        comment_ids, invalid_values = normalize_comment_ids(comment_values)
+        for value in invalid_values:
+            print(f"Ignored unrecognized comment ID: {value}")
+        if not comment_ids:
+            print("No valid comment ID was given.")
+            return
+
+        summary = downvote_comments_in_galleries(
+            gallery_urls,
+            comment_ids,
+            mongo_client=mongo_client,
+        )
+        affected = summary.get("affected_galleries") or []
+        if not affected:
+            print("\nNo gallery was affected; nothing to re-crawl.")
+            return
+        if mongo_client is None:
+            print("\nMongoDB client unavailable; skipping the re-crawl.")
+            return
+        print(f"\nRe-crawling {len(affected)} affected gallery/galleries...")
+        crawl_gallery_urls(
+            affected,
+            mongo_client,
+            label="Re-crawl",
+            max_workers=max_workers,
+        )
+    else:
+        # About
+        print("""
 E-Hentai Tome of History - a gallery comment fetcher and preserver for E-Hentai
 Copyright (C) 2026  Projekt-EH & AXIS5(AXIS5hacker)
 
@@ -187,7 +197,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.""")
-        print()
+    print()
 
 
 if __name__ == "__main__":
@@ -198,7 +208,7 @@ if __name__ == "__main__":
     Copyright (C) 2026  Projekt-EH & AXIS5(AXIS5hacker)
     """)
     print("=" * 50)
-
+    print(f"Running on pid {os.getpid()}", flush=True)
     parser = argparse.ArgumentParser(description="E-Hentai comment crawler")
     parser.add_argument("-p", "--parallel", type=int, default=15,
                         help="Max parallel workers for uploader/listing crawling (1-20, default: 15)")

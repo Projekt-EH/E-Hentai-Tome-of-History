@@ -270,6 +270,25 @@ config file is re-read at the start of every round, so edits — disabling a job
 interval — take effect without a restart; only a missing/invalid config file or a wrongly
 formatted `start_at`/`end_at` aborts the run. Stop auto mode with Ctrl+C.
 
+Auto mode keeps a four-task sliding window of gallery keys (gallery ID and token), not
+HTML, parsed pages, or comment data. The current task occupies one slot: starting task 5
+evicts task 1, starting task 6 evicts task 2. Gallery and uploader jobs skip keys already
+scheduled in the remaining window, including duplicates within the current job. Skipped
+keys do not refresh their original slot. Failed requests also remain in their task's slot
+until eviction, preventing immediate repeat attempts. Each enabled job consumes a slot,
+even when empty or invalid; disabled jobs do not. Each round starts with an empty window,
+which is released before the between-round wait. Uploader/listing pages are still fetched to discover URLs;
+only duplicate gallery crawls are skipped.
+
+After each auto job (including a failed or interrupted job), other task-local data and
+unreachable page objects are released before the scheduler waits. Interactive modes do not
+use this window and release their lists and summaries before returning to the menu. HTTP
+responses and parsed pages are disposed of after use; the existing session and login
+cookies remain available for subsequent requests. Configured job URLs remain in the
+configuration for the next round. Python's allocator may retain freed memory for reuse, so
+process RSS is not guaranteed to drop immediately; active batches still need memory for
+their gallery lists, deletion snapshots, and reports.
+
 Example:
 
 ```json

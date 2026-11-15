@@ -24,11 +24,14 @@ from .batch_gallery_list import collect_uploader_gallery_urls
 from .urlfetch import *
 from .crawl import crawl_comments
 from .result import print_single_gallery_result
+from .worker_monitor import worker, worker_output
 
 
 # ==================== Crawl orchestration ====================
-def crawl_uploader_galleries(uploader_url: str, page_depth=None, max_workers=15, client=None):
+def crawl_uploader_galleries(uploader_url: str, page_depth=None, max_workers=15, client=None, gallery_filter=None):
     gallery_urls = collect_uploader_gallery_urls(uploader_url, page_depth)
+    if gallery_filter is not None:
+        gallery_urls = gallery_filter(gallery_urls)
 
     total = len(gallery_urls)
     success = 0
@@ -59,6 +62,7 @@ def crawl_uploader_galleries(uploader_url: str, page_depth=None, max_workers=15,
 
     print(f"Discovered {total} galleries.")
 
+    @worker
     def process_gallery(args):
         index, gallery_url = args
         key = extract_gallery_key(gallery_url)
@@ -91,7 +95,7 @@ def crawl_uploader_galleries(uploader_url: str, page_depth=None, max_workers=15,
         sleep_with_jitter()
         return result
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with worker_output(), ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gallery") as executor:
         future_to_url = {
             executor.submit(process_gallery, (index, url)): url
             for index, url in enumerate(gallery_urls, start=1)
@@ -133,7 +137,7 @@ def crawl_uploader_galleries(uploader_url: str, page_depth=None, max_workers=15,
 
 
 # ==================== Gallery-list crawling ====================
-def crawl_gallery_urls(urls, client, label: str = "Gallery", max_workers: int = 1):
+def crawl_gallery_urls(urls, client, label: str = "Gallery", max_workers: int = 1, gallery_filter=None):
     """
     Crawl a list of gallery URLs.
 
@@ -148,6 +152,9 @@ def crawl_gallery_urls(urls, client, label: str = "Gallery", max_workers: int = 
     """
     if client is None:
         raise ValueError("A MongoDB client is required for gallery crawling.")
+
+    if gallery_filter is not None:
+        urls = gallery_filter(urls)
 
     data_buffer = DataBuffer(client)
 
@@ -166,6 +173,7 @@ def crawl_gallery_urls(urls, client, label: str = "Gallery", max_workers: int = 
     total = len(urls)
     workers = max(1, min(int(max_workers or 1), total)) if total else 1
 
+    @worker
     def crawl_one(index, url):
         try:
             result = crawl_comments(
@@ -176,22 +184,23 @@ def crawl_gallery_urls(urls, client, label: str = "Gallery", max_workers: int = 
         sleep_with_jitter()
         return index, url, result
 
-    if workers == 1:
-        for index, url in enumerate(urls, start=1):
-            print(f"\n{label} [{index}/{total}]: {url}")
-            _, _, result = crawl_one(index, url)
-            print_single_gallery_result(result)
-    else:
-        print(f"Crawling {total} gallery/galleries with {workers} parallel workers.")
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(crawl_one, index, url)
-                for index, url in enumerate(urls, start=1)
-            ]
-            for future in as_completed(futures):
-                index, url, result = future.result()
+    with worker_output():
+        if workers == 1:
+            for index, url in enumerate(urls, start=1):
                 print(f"\n{label} [{index}/{total}]: {url}")
+                _, _, result = crawl_one(index, url)
                 print_single_gallery_result(result)
+        else:
+            print(f"Crawling {total} gallery/galleries with {workers} parallel workers.")
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gallery") as executor:
+                futures = [
+                    executor.submit(crawl_one, index, url)
+                    for index, url in enumerate(urls, start=1)
+                ]
+                for future in as_completed(futures):
+                    index, url, result = future.result()
+                    print(f"\n{label} [{index}/{total}]: {url}")
+                    print_single_gallery_result(result)
 
     data_buffer.flush()
 

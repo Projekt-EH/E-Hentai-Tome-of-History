@@ -91,9 +91,15 @@ def collect_uploader_gallery_urls(uploader_url: str, page_depth=None):
             )
             return 0, None
 
-        html_content = request_result["html"]
-        soup = BeautifulSoup(html_content, 'html.parser')
-        page_gallery_urls = extract_gallery_urls_from_soup(soup, page_url)
+        soup = BeautifulSoup(request_result.pop("html"), 'html.parser')
+        try:
+            page_gallery_urls = extract_gallery_urls_from_soup(soup, page_url)
+            next_url = (
+                discover_next_page_url(soup, page_url)
+                if page_depth is None or depth < page_depth else None
+            )
+        finally:
+            soup.decompose()
         new_count = 0
 
         for gallery_url in page_gallery_urls:
@@ -104,19 +110,15 @@ def collect_uploader_gallery_urls(uploader_url: str, page_depth=None):
                 new_count += 1
 
         print(f"Found {new_count} new galleries on this page.")
-        return new_count, soup
+        return new_count, next_url
 
     page_url = start_url
     depth = 0
     while page_url and page_url not in visited_pages:
-        new_count, soup = scan_page(page_url)
-        if soup is None:
-            break
+        new_count, next_url = scan_page(page_url)
 
         if page_depth is not None and depth >= page_depth:
             break
-
-        next_url = discover_next_page_url(soup, page_url)
         if not next_url or next_url in visited_pages:
             break
 

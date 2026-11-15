@@ -251,6 +251,7 @@ def vote_comment(context: dict, comment_id: str, vote: int, session=None):
 
     Transport and decoding failures are returned as ``{"error": "..."}`` so callers can
     report a single failed comment without aborting the rest of the list.
+    The response is always closed after decoding; the caller's cookie session stays open.
     """
     session = session or SESSION
 
@@ -264,25 +265,31 @@ def vote_comment(context: dict, comment_id: str, vote: int, session=None):
         "comment_vote": vote,
     }
 
+    response = None
     try:
-        response = session.post(context["api_url"], json=payload, timeout=12)
-    except requests.exceptions.RequestException as exc:
-        return {"error": f"request failed: {exc}"}
+        try:
+            response = session.post(context["api_url"], json=payload, timeout=12)
+        except requests.exceptions.RequestException as exc:
+            response = exc.response
+            return {"error": f"request failed: {exc}"}
 
-    try:
-        response.raise_for_status()
-    except requests.exceptions.HTTPError:
-        return {"error": f"HTTP {response.status_code}: {response.text[:200]}"}
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError:
+            return {"error": f"HTTP {response.status_code}: {response.text[:200]}"}
 
-    try:
-        data = response.json()
-    except ValueError:
-        return {"error": f"invalid JSON response: {response.text[:200]}"}
+        try:
+            data = response.json()
+        except ValueError:
+            return {"error": f"invalid JSON response: {response.text[:200]}"}
 
-    if not isinstance(data, dict):
-        return {"error": f"unexpected API response: {data!r}"}
+        if not isinstance(data, dict):
+            return {"error": f"unexpected API response: {data!r}"}
 
-    return data
+        return data
+    finally:
+        if response is not None:
+            response.close()
 
 
 def _format_signed(value):

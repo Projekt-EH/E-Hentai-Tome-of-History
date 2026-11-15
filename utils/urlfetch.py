@@ -62,6 +62,8 @@ SESSION = create_session()
 
 # ==================== HTTP requests ====================
 def request_html(url: str,session):
+    """Return page text and diagnostic data, closing only the response, not the session."""
+    response = None
     try:
         response = session.get(url, timeout=12)
         response.raise_for_status()
@@ -73,12 +75,18 @@ def request_html(url: str,session):
             True, response.text, None, response.status_code, final_url, redirected, response
         )
     except requests.exceptions.Timeout as e:
+        if response is None:
+            response = e.response
         report_request_failure("timeout", None, url, e)
         return build_request_result(False, None, "timeout", None, url, False)
     except requests.exceptions.ConnectionError as e:
+        if response is None:
+            response = e.response
         report_request_failure("connection_error", None, url, e)
         return build_request_result(False, None, "connection_error", None, url, False)
     except requests.exceptions.HTTPError as e:
+        if response is None:
+            response = e.response
         status_code = e.response.status_code if e.response is not None else None
         if status_code == 403:
             error = "http_403"
@@ -98,8 +106,13 @@ def request_html(url: str,session):
             False, None, error, status_code, final_url, final_url != url, e.response
         )
     except requests.exceptions.RequestException as e:
+        if response is None:
+            response = e.response
         report_request_failure("request_exception", None, url, e)
         return build_request_result(False, None, "request_exception", None, url, False)
+    finally:
+        if response is not None:
+            response.close()
 
 # ==================== URL and pagination helpers ====================
 def extract_gallery_key(url: str):

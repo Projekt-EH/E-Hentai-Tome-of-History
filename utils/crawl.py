@@ -99,75 +99,86 @@ def resolve_latest_gallery_version(target_url: str, gallery_id: str, on_switch=N
             "target_url": str,        # URL of the page in "soup"
             "gallery_id": str         # gallery ID of the page in "soup"
         }
+    The caller owns the returned soup and must decompose it after parsing. Intermediate
+    pages and pages abandoned by exceptions are decomposed here.
     """
     visited_gallery_ids = {gallery_id}
     pending_switches = []
     soup = None
+    keep_soup = False
 
-    for _ in range(max(1, MAX_GALLERY_VERSION_HOPS + 1)):
-        print(f"Requesting gallery: {target_url}")
+    try:
+        for _ in range(max(1, MAX_GALLERY_VERSION_HOPS + 1)):
+            if soup is not None:
+                soup.decompose()
+                soup = None
+            print(f"Requesting gallery: {target_url}")
 
-        request_result = request_html(target_url, SESSION)
-        if not request_result["ok"]:
-            return {
-                "ok": False,
-                "error": request_result["error"],
-                "status_code": request_result["status_code"],
-                "request_result": request_result,
-                "soup": None,
-                "target_url": target_url,
-                "gallery_id": gallery_id
-            }
+            request_result = request_html(target_url, SESSION)
+            if not request_result["ok"]:
+                return {
+                    "ok": False,
+                    "error": request_result["error"],
+                    "status_code": request_result["status_code"],
+                    "request_result": request_result,
+                    "soup": None,
+                    "target_url": target_url,
+                    "gallery_id": gallery_id
+                }
 
-        soup = BeautifulSoup(request_result["html"], 'html.parser')
+            soup = BeautifulSoup(request_result["html"], 'html.parser')
 
-        # The page of the version we switched to has been fetched, so the galleries we left
-        # behind are now known to be outdated: hand them over to the caller.
-        if pending_switches and on_switch is not None:
-            for switch in pending_switches:
-                on_switch(switch["from_gallery_id"], switch["to_gallery_id"], switch["to_url"])
-        pending_switches = []
+            # A fetched successor confirms that the galleries left behind are outdated.
+            if pending_switches and on_switch is not None:
+                for switch in pending_switches:
+                    on_switch(switch["from_gallery_id"], switch["to_gallery_id"], switch["to_url"])
+            pending_switches = []
 
-        newer_links = extract_newer_version_links(soup, target_url)
-        newest_link, warning = select_newest_version_link(newer_links)
-        if warning:
-            print(warning)
+            newer_links = extract_newer_version_links(soup, target_url)
+            newest_link, warning = select_newest_version_link(newer_links)
+            if warning:
+                print(warning)
 
-        if not newest_link:
-            break
+            if not newest_link:
+                break
 
-        if newest_link["gallery_id"] == gallery_id or newest_link["gallery_id"] in visited_gallery_ids:
+            if newest_link["gallery_id"] == gallery_id or newest_link["gallery_id"] in visited_gallery_ids:
+                print(
+                    f"Gallery {gallery_id} points to an already fetched version "
+                    f"({newest_link['gallery_id']}); keeping the current page."
+                )
+                break
+
+            pending_switches.append({
+                "from_gallery_id": gallery_id,
+                "to_gallery_id": newest_link["gallery_id"],
+                "to_url": newest_link["url"]
+            })
+            target_url = newest_link["url"]
+            gallery_id = newest_link["gallery_id"]
+            visited_gallery_ids.add(gallery_id)
+            print(f"switched to new version: {gallery_id}")
+            sleep_with_jitter()
+        else:
             print(
-                f"Gallery {gallery_id} points to an already fetched version "
-                f"({newest_link['gallery_id']}); keeping the current page."
+                f"Gallery version hop limit ({MAX_GALLERY_VERSION_HOPS}) reached; "
+                f"stopping at gallery {gallery_id}."
             )
-            break
 
-        pending_switches.append({
-            "from_gallery_id": gallery_id,
-            "to_gallery_id": newest_link["gallery_id"],
-            "to_url": newest_link["url"]
-        })
-        target_url = newest_link["url"]
-        gallery_id = newest_link["gallery_id"]
-        visited_gallery_ids.add(gallery_id)
-        print(f"switched to new version: {gallery_id}")
-        sleep_with_jitter()
-    else:
-        print(
-            f"Gallery version hop limit ({MAX_GALLERY_VERSION_HOPS}) reached; "
-            f"stopping at gallery {gallery_id}."
-        )
-
-    return {
-        "ok": True,
-        "error": None,
-        "status_code": 200,
-        "request_result": request_result,
-        "soup": soup,
-        "target_url": target_url,
-        "gallery_id": gallery_id
-    }
+        result = {
+            "ok": True,
+            "error": None,
+            "status_code": 200,
+            "request_result": request_result,
+            "soup": soup,
+            "target_url": target_url,
+            "gallery_id": gallery_id
+        }
+        keep_soup = True
+        return result
+    finally:
+        if soup is not None and not keep_soup:
+            soup.decompose()
 
 
 def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None, deletion_tracker=None):
@@ -216,197 +227,201 @@ def crawl_comments(mongo_client, input_url: str, data_buffer: DataBuffer = None,
             "status_code": resolution["status_code"]
         }
 
-    soup = resolution["soup"]
-    request_result = resolution["request_result"]
-    comments_list = []
-    edits_list = []
+    soup = resolution.pop("soup")
+    try:
+        request_result = resolution["request_result"]
+        request_result.pop("html", None)
+        comments_list = []
+        edits_list = []
 
-    cdiv = soup.find('div', id='cdiv')
+        cdiv = soup.find('div', id='cdiv')
 
-    if not cdiv:
-        reason = diagnose_gallery_page_without_comments(
-            soup,
-            target_url,
-            request_result=request_result
-        )
-        return {
-            "success": False,
-            "gallery_id": gallery_id,
-            "comments": 0,
-            "error": reason
-        }
+        if not cdiv:
+            reason = diagnose_gallery_page_without_comments(
+                soup,
+                target_url,
+                request_result=request_result
+            )
+            return {
+                "success": False,
+                "gallery_id": gallery_id,
+                "comments": 0,
+                "error": reason
+            }
 
-    # The comment IDs we already store for this gallery must be collected before the comments
-    # crawled below reach MongoDB (the DataBuffer may flush while we are still parsing), so the
-    # deletion check compares against the state from before this crawl.
-    tracker = deletion_tracker
-    if tracker is None:
-        tracker = get_comment_deletion_tracker(mongo_client)
-    if tracker is not None:
-        tracker.snapshot_for(gallery_id)
+        # The comment IDs we already store for this gallery must be collected before the comments
+        # crawled below reach MongoDB (the DataBuffer may flush while we are still parsing), so the
+        # deletion check compares against the state from before this crawl.
+        tracker = deletion_tracker
+        if tracker is None:
+            tracker = get_comment_deletion_tracker(mongo_client)
+        if tracker is not None:
+            tracker.snapshot_for(gallery_id)
 
-    uploader_comment = ""
-    anchors = cdiv.find_all('a', attrs={'name': re.compile(r'^c\d+$')})
-    
-    utc_now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-
-    for anchor in anchors:
-        anchor_name = anchor.get('name')
+        uploader_comment = ""
+        anchors = cdiv.find_all('a', attrs={'name': re.compile(r'^c\d+$')})
         
-        if anchor_name == 'c0':
-            comment_div = anchor.find_next_sibling('div')
-            if comment_div:
-                c6_div = comment_div.find('div', id='comment_0')
-                if not c6_div:
-                    c6_div = comment_div.find('div', class_='c6')
-                if c6_div:
-                    uploader_comment = "".join(str(child) for child in c6_div.children)
-            continue
+        utc_now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+        for anchor in anchors:
+            anchor_name = anchor.get('name')
             
-        comment_id = anchor_name[1:] 
-        comment_div = anchor.find_next_sibling('div')
-        if not comment_div:
-            continue
-            
-        c3_div = comment_div.find('div', class_='c3')
-        username = "Unknown"
-        post_time = None
-        
-        extracted_user_id = None
-        extracted_forums_url = None
-        
-        if c3_div:
-            text_content = c3_div.get_text()
-            time_match = re.search(r'Posted on\s+(.*?)\s+by:', text_content)
-            if time_match:
-                iso_time = parse_time(time_match.group(1))
-                post_time = convert_to_mongodb_date(iso_time)
-            
-            user_a = c3_div.find('a')
-            if user_a:
-                username = user_a.get_text().strip()
-            
-            forums_a = c3_div.find('a', href=re.compile(r'showuser=\d+'))
-            if forums_a:
-                href_str = forums_a.get('href')
-                id_match = re.search(r'showuser=(\d+)', href_str)
-                if id_match:
-                    extracted_user_id = id_match.group(1)
-                    extracted_forums_url = f"https://forums.e-hentai.org/index.php?showuser={extracted_user_id}"
+            if anchor_name == 'c0':
+                comment_div = anchor.find_next_sibling('div')
+                if comment_div:
+                    c6_div = comment_div.find('div', id='comment_0')
+                    if not c6_div:
+                        c6_div = comment_div.find('div', class_='c6')
+                    if c6_div:
+                        uploader_comment = "".join(str(child) for child in c6_div.children)
+                continue
                 
-        score_span = comment_div.find('span', id=f'comment_score_{comment_id}')
-        current_score = 0
-        if score_span:
-            try:
-                current_score = int(score_span.get_text().strip())
-            except ValueError:
-                pass
-
-        c7_div = comment_div.find('div', id=f'cvotes_{comment_id}')
-        if not c7_div:
-            c7_div = comment_div.find('div', class_='c7')
-        
-        power = 0
-        vote_list = []
-        if c7_div:
-            c7_text = c7_div.get_text()
-            base_match = re.search(r'Base\s+([+-]?\d+)', c7_text)
-            if base_match:
-                power = int(base_match.group(1))
-            for span in c7_div.find_all('span'):
-                span_text = span.get_text().strip()
-                if "and" in span_text and "more" in span_text:
-                    continue
-                span_match = re.search(r'^(.*?)\s+([+-]?\d+)$', span_text, re.DOTALL)
-                if span_match:
-                    voter_name = span_match.group(1).strip()
-                    voter_power = int(span_match.group(2))
-                    vote_list.append({
-                        "voter": voter_name,
-                        "power": voter_power
-                    })
-
-        c6_div = comment_div.find('div', id=f'comment_{comment_id}')
-        if not c6_div:
-            c6_div = comment_div.find('div', class_='c6')
-        
-        content_html = "".join(str(child) for child in c6_div.children) if c6_div else ""
-        
-        c8_divs = comment_div.find_all('div', class_='c8')
-        is_edited = len(c8_divs) > 0
-        
-        for c8 in c8_divs:
-            c8_text = c8.get_text()
-            edit_time_match = re.search(r'on\s+(.*)', c8_text)
-            if edit_time_match:
-                iso_edit_time = parse_time(edit_time_match.group(1).rstrip('.'))
-            else:
-                iso_edit_time = parse_time(c8_text.rstrip('.'))
+            comment_id = anchor_name[1:] 
+            comment_div = anchor.find_next_sibling('div')
+            if not comment_div:
+                continue
+                
+            c3_div = comment_div.find('div', class_='c3')
+            username = "Unknown"
+            post_time = None
             
-            mongodb_edit_time = convert_to_mongodb_date(iso_edit_time)
-            edit_content = content_html
+            extracted_user_id = None
+            extracted_forums_url = None
             
-            edits_list.append({
-                "comment_id": comment_id,
-                "edit_time": mongodb_edit_time,
-                "edit_content": edit_content
-            })
+            if c3_div:
+                text_content = c3_div.get_text()
+                time_match = re.search(r'Posted on\s+(.*?)\s+by:', text_content)
+                if time_match:
+                    iso_time = parse_time(time_match.group(1))
+                    post_time = convert_to_mongodb_date(iso_time)
+                
+                user_a = c3_div.find('a')
+                if user_a:
+                    username = user_a.get_text().strip()
+                
+                forums_a = c3_div.find('a', href=re.compile(r'showuser=\d+'))
+                if forums_a:
+                    href_str = forums_a.get('href')
+                    id_match = re.search(r'showuser=(\d+)', href_str)
+                    if id_match:
+                        extracted_user_id = id_match.group(1)
+                        extracted_forums_url = f"https://forums.e-hentai.org/index.php?showuser={extracted_user_id}"
+                    
+            score_span = comment_div.find('span', id=f'comment_score_{comment_id}')
+            current_score = 0
+            if score_span:
+                try:
+                    current_score = int(score_span.get_text().strip())
+                except ValueError:
+                    pass
 
-        # _id MUST be comment_id for proper indexing and upsert operations in MongoDB
-        # Taking gallery updates into consideration, we should not use a composite key of gallery_id + comment_id, as comment_id will change in an update.
+            c7_div = comment_div.find('div', id=f'cvotes_{comment_id}')
+            if not c7_div:
+                c7_div = comment_div.find('div', class_='c7')
+            
+            power = 0
+            vote_list = []
+            if c7_div:
+                c7_text = c7_div.get_text()
+                base_match = re.search(r'Base\s+([+-]?\d+)', c7_text)
+                if base_match:
+                    power = int(base_match.group(1))
+                for span in c7_div.find_all('span'):
+                    span_text = span.get_text().strip()
+                    if "and" in span_text and "more" in span_text:
+                        continue
+                    span_match = re.search(r'^(.*?)\s+([+-]?\d+)$', span_text, re.DOTALL)
+                    if span_match:
+                        voter_name = span_match.group(1).strip()
+                        voter_power = int(span_match.group(2))
+                        vote_list.append({
+                            "voter": voter_name,
+                            "power": voter_power
+                        })
 
-        # Comment existence is not decided here: after the whole page has been parsed, the
-        # comment IDs that MongoDB knows for this gallery are compared with the IDs collected
-        # below, and the ones that are missing are flagged as deleted (see the
-        # CommentDeletionTracker call at the end of this function). Comments written here are
-        # therefore always stored with cleaned = False.
-        comment_data = {
-            "_id": comment_id,
+            c6_div = comment_div.find('div', id=f'comment_{comment_id}')
+            if not c6_div:
+                c6_div = comment_div.find('div', class_='c6')
+            
+            content_html = "".join(str(child) for child in c6_div.children) if c6_div else ""
+            
+            c8_divs = comment_div.find_all('div', class_='c8')
+            is_edited = len(c8_divs) > 0
+            
+            for c8 in c8_divs:
+                c8_text = c8.get_text()
+                edit_time_match = re.search(r'on\s+(.*)', c8_text)
+                if edit_time_match:
+                    iso_edit_time = parse_time(edit_time_match.group(1).rstrip('.'))
+                else:
+                    iso_edit_time = parse_time(c8_text.rstrip('.'))
+                
+                mongodb_edit_time = convert_to_mongodb_date(iso_edit_time)
+                edit_content = content_html
+                
+                edits_list.append({
+                    "comment_id": comment_id,
+                    "edit_time": mongodb_edit_time,
+                    "edit_content": edit_content
+                })
+
+            # _id MUST be comment_id for proper indexing and upsert operations in MongoDB
+            # Taking gallery updates into consideration, we should not use a composite key of gallery_id + comment_id, as comment_id will change in an update.
+
+            # Comment existence is not decided here: after the whole page has been parsed, the
+            # comment IDs that MongoDB knows for this gallery are compared with the IDs collected
+            # below, and the ones that are missing are flagged as deleted (see the
+            # CommentDeletionTracker call at the end of this function). Comments written here are
+            # therefore always stored with cleaned = False.
+            comment_data = {
+                "_id": comment_id,
+                "gallery_id": gallery_id,
+                "username": username,
+                "post_time": post_time,
+                "source_url": target_url,
+                "current_score": current_score,
+                "power": power,
+                "vote_list": vote_list,
+                "is_edited": is_edited,
+                "fetch_time": convert_to_mongodb_date(utc_now_str),
+                "cleaned": False # check if the comment is gone
+            }
+            
+            if extracted_user_id:
+                comment_data["user_id"] = extracted_user_id
+            if extracted_forums_url:
+                comment_data["user_forums_url"] = extracted_forums_url
+            
+            if not is_edited:
+                comment_data["content"] = content_html
+            
+            comments_list.append(comment_data)
+            
+        gdn_div = soup.find('div', id='gdn')
+        
+        uploader_data = {
             "gallery_id": gallery_id,
-            "username": username,
-            "post_time": post_time,
             "source_url": target_url,
-            "current_score": current_score,
-            "power": power,
-            "vote_list": vote_list,
-            "is_edited": is_edited,
-            "fetch_time": convert_to_mongodb_date(utc_now_str),
-            "cleaned": False # check if the comment is gone
+            "time": convert_to_mongodb_date(utc_now_str)
         }
         
-        if extracted_user_id:
-            comment_data["user_id"] = extracted_user_id
-        if extracted_forums_url:
-            comment_data["user_forums_url"] = extracted_forums_url
+        if uploader_comment:
+            comment_digest = hashlib.sha256(uploader_comment.encode('utf-8')).hexdigest()
+            uploader_data["uploader_comment"] = uploader_comment
+            uploader_data["comment_sha256"] = comment_digest
         
-        if not is_edited:
-            comment_data["content"] = content_html
-        
-        comments_list.append(comment_data)
-        
-    gdn_div = soup.find('div', id='gdn')
-    
-    uploader_data = {
-        "gallery_id": gallery_id,
-        "source_url": target_url,
-        "time": convert_to_mongodb_date(utc_now_str)
-    }
-    
-    if uploader_comment:
-        comment_digest = hashlib.sha256(uploader_comment.encode('utf-8')).hexdigest()
-        uploader_data["uploader_comment"] = uploader_comment
-        uploader_data["comment_sha256"] = comment_digest
-    
-    if gdn_div:
-        uploader_a = gdn_div.find('a', href=re.compile(r'/uploader/'))
-        if uploader_a:
-            uploader_data["uploader_name"] = uploader_a.get_text().strip()
-            
-        forums_a = gdn_div.find('a', href=re.compile(r'showuser=\d+'))
-        if forums_a:
-            id_match = re.search(r'showuser=(\d+)', forums_a.get('href', ''))
-            if id_match:
-                uploader_data["uploader_id"] = id_match.group(1)
+        if gdn_div:
+            uploader_a = gdn_div.find('a', href=re.compile(r'/uploader/'))
+            if uploader_a:
+                uploader_data["uploader_name"] = uploader_a.get_text().strip()
+                
+            forums_a = gdn_div.find('a', href=re.compile(r'showuser=\d+'))
+            if forums_a:
+                id_match = re.search(r'showuser=(\d+)', forums_a.get('href', ''))
+                if id_match:
+                    uploader_data["uploader_id"] = id_match.group(1)
+    finally:
+        soup.decompose()
 
     # Comment deletion check: everything MongoDB stores for this gallery that was not seen in
     # this successful crawl is gone from the gallery page, so it is flagged as deleted. The
