@@ -41,6 +41,7 @@ from urllib.parse import urlparse
 import requests
 
 from .urlfetch import SESSION, extract_gallery_key, process_url, request_html
+from .runtime_report import timed_request
 
 COMMENT_VOTE_UP = 1
 COMMENT_VOTE_DOWN = -1
@@ -268,7 +269,8 @@ def vote_comment(context: dict, comment_id: str, vote: int, session=None):
     response = None
     try:
         try:
-            response = session.post(context["api_url"], json=payload, timeout=12)
+            with timed_request("Vote POST"):
+                response = session.post(context["api_url"], json=payload, timeout=12)
         except requests.exceptions.RequestException as exc:
             response = exc.response
             return {"error": f"request failed: {exc}"}

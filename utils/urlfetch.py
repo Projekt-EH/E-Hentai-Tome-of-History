@@ -58,6 +58,8 @@ def create_session():
 
     return session
 
+from .runtime_report import timed_request
+
 SESSION = create_session()
 
 # ==================== HTTP requests ====================
@@ -65,7 +67,9 @@ def request_html(url: str,session):
     """Return page text and diagnostic data, closing only the response, not the session."""
     response = None
     try:
-        response = session.get(url, timeout=12)
+        category = "Gallery GET" if extract_gallery_key(url) is not None else "Gallery list GET"
+        with timed_request(category):
+            response = session.get(url, timeout=12)
         response.raise_for_status()
         final_url = response.url
         redirected = final_url != url

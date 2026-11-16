@@ -313,6 +313,40 @@ Example:
 }
 ```
 
+## Runtime HTML report
+
+The program appends English diagnostics to `reports/runtime-report.html` under the project
+directory. Open the file locally in a browser. Existing entries are retained across runs.
+Each document is capped at 50 MB (50,000,000 bytes), including HTML markup. If the next
+complete entry would exceed the limit, it goes into `runtime-report-2.html`, then
+`runtime-report-3.html`, and so on. Each volume opens independently; restarts append to
+the latest numbered volume. Entries are never split between documents.
+Each interactive operation that makes an HTTP request adds one entry when it ends. About
+and operations with no HTTP requests (including invalid input, empty work, or JSON-only
+merging) add none. Auto mode adds one entry per round of all enabled jobs only if that
+round made HTTP requests, not one per job or another entry when returning to the menu.
+Each entry is flushed and synchronized to disk immediately after it is appended, before
+returning to the menu or waiting for the next auto round.
+
+Each entry shows request count, average latency, nearest-rank P95, P95 average (the mean
+of the fastest `ceil(0.95 × count)` calls), and total time for gallery-list GET, gallery
+GET, and vote POST, including failed calls. Total time is the union of request intervals:
+overlapping time counts once, idle gaps are excluded, and overlap is marked `Parallel`.
+The all-requests total merges intervals across categories, rather than summing row totals.
+Timing covers the complete `requests` call, including download, internal retries and
+redirects (one logical request), but excludes parsing, database writes and deliberate waits.
+
+Use the Mode dropdown to filter records and the Run / round dropdown to select one record.
+Only the selected record is displayed and its details start collapsed. The overview scatter
+plot shows UTC start time against elapsed wall seconds; click or keyboard-activate a point
+to open its record. Each point is one operation or auto round. Older-format volumes are
+preserved unchanged; the new interactive format starts a new numbered volume.
+
+RSS is sampled during execution, with start/end, sampled peak, change, and a memory
+timeline. The final sample follows cleanup and native memory trimming. Sampling may miss
+brief peaks. Reports contain no request URLs, cookies, or vote credentials. Reports are
+local generated files and are ignored by Git.
+
 ## Newer gallery versions
 
 E-Hentai shows a "There are newer versions of this gallery available:" notice inside

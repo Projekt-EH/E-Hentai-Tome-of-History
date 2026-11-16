@@ -26,6 +26,7 @@ from utils.batch_crawling import crawl_uploader_galleries, crawl_gallery_urls
 from utils.auto_mode import run_auto_mode, get_default_auto_config_path
 from utils.result import print_batch_crawling_report
 from utils.worker_monitor import release_unused_memory, report_memory
+from utils.runtime_report import report_run
 from utils.comment_vote import (
     downvote_comments_in_galleries,
     normalize_comment_ids,
@@ -102,12 +103,21 @@ def main(max_workers=15):
             print("Invalid input. Please enter 1, 2, 3, 4, 5, 6, exit, or quit.")
             continue
 
-        try:
-            run_interactive_mode(mode, max_workers, mongo_client)
-        finally:
-            release_unused_memory()
-            if mode != '6':
-                report_memory()
+        if mode in ('4', '6'):
+            try:
+                run_interactive_mode(mode, max_workers, mongo_client)
+            finally:
+                release_unused_memory()
+                if mode != '6':
+                    report_memory()
+        else:
+            labels = {'1': 'Gallery crawl', '2': 'Uploader crawl', '3': 'JSON merge', '5': 'Comment voting and re-crawl'}
+            with report_run(labels[mode]):
+                try:
+                    run_interactive_mode(mode, max_workers, mongo_client)
+                finally:
+                    release_unused_memory()
+                    report_memory()
 
 
 def run_interactive_mode(mode, max_workers, mongo_client):

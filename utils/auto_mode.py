@@ -27,6 +27,7 @@ from .urlfetch import sleep_with_jitter, extract_gallery_key
 from .batch_crawling import crawl_uploader_galleries, crawl_gallery_urls
 from .result import print_batch_crawling_report
 from .worker_monitor import release_unused_memory, report_memory
+from .runtime_report import report_run
 
 
 def get_default_auto_config_path():
@@ -268,9 +269,13 @@ def run_auto_mode(config_path: str, max_workers: int = 15, client=None):
                 continue
 
             print(f"\nAuto mode round started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            run_auto_jobs(
-                config.get("jobs", []), max_workers=max_workers, client=client
-            )
+            with report_run("Auto round"):
+                try:
+                    run_auto_jobs(
+                        config.get("jobs", []), max_workers=max_workers, client=client
+                    )
+                finally:
+                    release_unused_memory()
 
             sleep_seconds = get_interval_sleep_seconds(config)
             finished_at = datetime.now()
